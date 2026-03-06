@@ -186,10 +186,6 @@ if [ "$HAS_JQ" -eq 1 ]; then
   fi
 fi
 
-# ---- usage colors ----
-usage_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;189m'; fi; }  # lavender
-cost_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;222m'; fi; }   # light gold
-burn_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;220m'; fi; }   # bright gold
 session_color() { 
   rem_pct=$(( 100 - session_pct ))
   if   (( rem_pct <= 10 )); then SCLR='38;5;210'  # light pink
@@ -198,59 +194,8 @@ session_color() {
   if [ "$use_color" -eq 1 ]; then printf '\033[%sm' "$SCLR"; fi
 }
 
-# ---- cost and usage extraction ----
+# ---- session reset time (ccusage) ----
 session_txt=""; session_pct=0; session_bar=""
-cost_usd=""; cost_per_hour=""; tpm=""; tot_tokens=""
-
-# Extract cost and token data from Claude Code's native input
-if [ "$HAS_JQ" -eq 1 ]; then
-  # Cost data
-  cost_usd=$(echo "$input" | jq -r '.cost.total_cost_usd // empty' 2>/dev/null)
-  total_duration_ms=$(echo "$input" | jq -r '.cost.total_duration_ms // empty' 2>/dev/null)
-
-  # Calculate burn rate ($/hour) from cost and duration
-  if [ -n "$cost_usd" ] && [ -n "$total_duration_ms" ] && [ "$total_duration_ms" -gt 0 ]; then
-    cost_per_hour=$(echo "$cost_usd $total_duration_ms" | awk '{printf "%.2f", $1 * 3600000 / $2}')
-  fi
-
-  # Token data from native context_window (no ccusage needed)
-  input_tokens=$(echo "$input" | jq -r '.context_window.total_input_tokens // 0' 2>/dev/null)
-  output_tokens=$(echo "$input" | jq -r '.context_window.total_output_tokens // 0' 2>/dev/null)
-
-  if [ "$input_tokens" != "null" ] && [ "$output_tokens" != "null" ]; then
-    tot_tokens=$(( input_tokens + output_tokens ))
-    [ "$tot_tokens" -eq 0 ] && tot_tokens=""
-  fi
-
-  # Calculate tokens per minute from native data
-  if [ -n "$tot_tokens" ] && [ -n "$total_duration_ms" ] && [ "$total_duration_ms" -gt 0 ]; then
-    # Convert ms to minutes and calculate rate
-    tpm=$(echo "$tot_tokens $total_duration_ms" | awk '{if ($2 > 0) printf "%.0f", $1 * 60000 / $2; else print ""}')
-  fi
-else
-  # Bash fallback for cost extraction
-  cost_usd=$(echo "$input" | grep -o '"total_cost_usd"[[:space:]]*:[[:space:]]*[0-9.]*' | sed 's/.*:[[:space:]]*\([0-9.]*\).*/\1/')
-  total_duration_ms=$(echo "$input" | grep -o '"total_duration_ms"[[:space:]]*:[[:space:]]*[0-9]*' | sed 's/.*:[[:space:]]*\([0-9]*\).*/\1/')
-
-  # Calculate burn rate ($/hour) from cost and duration
-  if [ -n "$cost_usd" ] && [ -n "$total_duration_ms" ] && [ "$total_duration_ms" -gt 0 ]; then
-    cost_per_hour=$(echo "$cost_usd $total_duration_ms" | awk '{printf "%.2f", $1 * 3600000 / $2}')
-  fi
-
-  # Token data from native context_window (bash fallback)
-  input_tokens=$(echo "$input" | grep -o '"total_input_tokens"[[:space:]]*:[[:space:]]*[0-9]*' | sed 's/.*:[[:space:]]*\([0-9]*\).*/\1/')
-  output_tokens=$(echo "$input" | grep -o '"total_output_tokens"[[:space:]]*:[[:space:]]*[0-9]*' | sed 's/.*:[[:space:]]*\([0-9]*\).*/\1/')
-
-  if [ -n "$input_tokens" ] && [ -n "$output_tokens" ]; then
-    tot_tokens=$(( input_tokens + output_tokens ))
-    [ "$tot_tokens" -eq 0 ] && tot_tokens=""
-  fi
-
-  # Calculate tokens per minute from native data
-  if [ -n "$tot_tokens" ] && [ -n "$total_duration_ms" ] && [ "$total_duration_ms" -gt 0 ]; then
-    tpm=$(echo "$tot_tokens $total_duration_ms" | awk '{if ($2 > 0) printf "%.0f", $1 * 60000 / $2; else print ""}')
-  fi
-fi
 
 # Session reset time requires ccusage (only feature that needs external tool)
 if command -v ccusage >/dev/null 2>&1 && [ "$HAS_JQ" -eq 1 ]; then
@@ -289,7 +234,7 @@ fi
 
 # ---- log extracted data ----
 {
-  echo "[$TIMESTAMP] Extracted: dir=${current_dir:-}, model=${model_name:-}, version=${model_version:-}, git=${git_branch:-}, context=${context_pct:-}, cost=${cost_usd:-}, cost_ph=${cost_per_hour:-}, tokens=${tot_tokens:-}, tpm=${tpm:-}, session_pct=${session_pct:-}"
+  echo "[$TIMESTAMP] Extracted: dir=${current_dir:-}, model=${model_name:-}, version=${model_version:-}, git=${git_branch:-}, context=${context_pct:-}, session_pct=${session_pct:-}"
   if [ "$HAS_JQ" -eq 0 ]; then
     echo "[$TIMESTAMP] Note: Context, tokens, and session info require jq for full functionality"
   fi
@@ -327,22 +272,22 @@ if [ -n "$output_style" ] && [ "$output_style" != "null" ]; then
   printf '  🎨 %s%s%s' "$(style_color)" "$output_style" "$(rst)"
 fi
 
-# Line 2: Context and session time
+# Line 2: Context and usage
 line2=""
 if [ -n "$context_pct" ]; then
   context_bar=$(progress_bar "$context_remaining_pct" 10)
   line2="🧠 $(context_color)Context Remaining: ${context_pct} [${context_bar}]$(rst)"
 fi
-if [ -n "$session_txt" ]; then
-  if [ -n "$line2" ]; then
-    line2="$line2  ⌛ $(session_color)${session_txt}$(rst) $(session_color)[${session_bar}]$(rst)"
-  else
-    line2="⌛ $(session_color)${session_txt}$(rst) $(session_color)[${session_bar}]$(rst)"
-  fi
-fi
 if [ -z "$line2" ] && [ -z "$context_pct" ]; then
   line2="🧠 $(context_color)Context Remaining: TBD$(rst)"
 fi
+
+
+# Session time (from ccusage)
+if [ -n "$session_txt" ]; then
+  line2="${line2}  ⌛ $(session_color)${session_txt}$(rst) $(session_color)[${session_bar}]$(rst)"
+fi
+
 
 # Print lines
 if [ -n "$line2" ]; then

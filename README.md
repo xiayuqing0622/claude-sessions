@@ -19,26 +19,17 @@ When running multiple Claude Code sessions simultaneously, it's hard to remember
 ```bash
 git clone https://github.com/xiayuqing0622/claude-sessions.git
 cd claude-sessions
-
-# Install cs command
-ln -s $(pwd)/cs ~/bin/cs
-
-# Install statusline (shows session label inside Claude Code)
-ln -sf $(pwd)/statusline.sh ~/.claude/statusline.sh
+./cs install
 ```
 
-Make sure `~/bin` is in your `PATH`.
+That's it — one command, zero interaction. The installer will:
+- Copy `cs` and `cs-hook` to `~/bin`
+- Copy `statusline.sh` and configure `~/.claude/settings.json` (statusLine + auto-label hook)
+- Add `~/bin` to `PATH` in your shell rc if needed
 
-Then add to `~/.claude/settings.json`:
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline.sh",
-    "padding": 0
-  }
-}
-```
+If a project-level `.claude` directory is detected, you'll be asked which one to inject settings into (default: `~/.claude` for all projects).
+
+To install to a custom bin directory: `./cs install /usr/local/bin`
 
 ## Usage
 

@@ -313,6 +313,159 @@ def cmd_clean():
         print("No stale labels to clean.")
 
 
+def _prompt_choice(prompt_text, options, default=0):
+    """Interactive single-choice prompt. Returns selected option."""
+    print(prompt_text)
+    for i, (label, _) in enumerate(options):
+        marker = f"{GREEN}>{NC}" if i == default else " "
+        print(f"  {marker} {i + 1}) {label}")
+    while True:
+        try:
+            raw = input(f"\nChoice [{default + 1}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        if raw == "":
+            return options[default][1]
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(options):
+                return options[idx][1]
+        except ValueError:
+            pass
+        print("Invalid choice, try again.")
+
+
+def cmd_install(target_dir=None):
+    """One-click install: copy files, hooks, statusline, PATH — all set."""
+    import shutil
+
+    script_dir = Path(__file__).resolve().parent
+    cs_src = script_dir / "cs"
+    cs_hook_src = script_dir / "cs-hook"
+    statusline_src = script_dir / "statusline.sh"
+
+    # --- Bin dir: default ~/bin, or user-specified ---
+    if target_dir:
+        bin_dir = Path(target_dir).expanduser().resolve()
+    else:
+        bin_dir = Path.home() / "bin"
+
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name, src in [("cs", cs_src), ("cs-hook", cs_hook_src)]:
+        dst = bin_dir / name
+        if dst.is_symlink():
+            dst.unlink()
+        shutil.copy2(src, dst)
+        dst.chmod(dst.stat().st_mode | 0o755)
+        print(f"{GREEN}Installed {dst}{NC}")
+
+    # --- Choose .claude dir: ask only when project-level .claude exists ---
+    user_claude = Path.home() / ".claude"
+    claude_options = [
+        (str(user_claude) + "  (all projects)", user_claude),
+    ]
+    cwd = Path.cwd().resolve()
+    real_home = str(Path.home().resolve())
+    sym_home = str(Path.home())
+    for d in [cwd] + list(cwd.parents):
+        proj_claude = d / ".claude"
+        if proj_claude.is_dir() and proj_claude != user_claude:
+            label = str(proj_claude)
+            if label.startswith(real_home):
+                label = "~" + label[len(real_home):]
+            elif label.startswith(sym_home):
+                label = "~" + label[len(sym_home):]
+            claude_options.append((label + "  (this project)", proj_claude))
+            break
+
+    if len(claude_options) > 1:
+        claude_dir = _prompt_choice(
+            f"\n{BOLD}Inject settings into which .claude?{NC}", claude_options, default=0
+        )
+    else:
+        claude_dir = user_claude
+
+    claude_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy statusline.sh into chosen .claude dir
+    sl_dst = claude_dir / "statusline.sh"
+    if sl_dst.is_symlink():
+        sl_dst.unlink()
+    shutil.copy2(statusline_src, sl_dst)
+    sl_dst.chmod(sl_dst.stat().st_mode | 0o755)
+    print(f"{GREEN}Installed {sl_dst}{NC}")
+
+    # Update settings.json in chosen .claude dir
+    settings_file = claude_dir / "settings.json"
+    settings = {}
+    if settings_file.exists():
+        try:
+            settings = json.loads(settings_file.read_text())
+        except Exception:
+            pass
+
+    # StatusLine config
+    settings["statusLine"] = {
+        "type": "command",
+        "command": str(sl_dst),
+        "padding": 0,
+    }
+
+    # Add cs-hook to PreToolUse hooks (if not already present)
+    cs_hook_cmd = str(bin_dir / "cs-hook")
+    hooks = settings.setdefault("hooks", {})
+    pre_tool = hooks.setdefault("PreToolUse", [])
+
+    # Find or create the catch-all matcher entry
+    catch_all = None
+    for entry in pre_tool:
+        if entry.get("matcher", "") == "":
+            catch_all = entry
+            break
+    if catch_all is None:
+        catch_all = {"matcher": "", "hooks": []}
+        pre_tool.append(catch_all)
+
+    hook_list = catch_all.setdefault("hooks", [])
+    # Check if cs-hook is already registered
+    already = any(h.get("command", "").endswith("cs-hook") for h in hook_list)
+    if not already:
+        hook_list.append({"type": "command", "command": cs_hook_cmd})
+        print(f"{GREEN}Added cs-hook to PreToolUse hooks{NC}")
+    else:
+        print(f"{DIM}cs-hook already in PreToolUse hooks{NC}")
+
+    settings_file.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+    print(f"{GREEN}Updated {settings_file}{NC}")
+
+    # 4. Ensure ~/bin is in PATH — add to shell rc if needed
+    path_dirs = os.environ.get("PATH", "").split(":")
+    if str(bin_dir) not in path_dirs:
+        # Detect shell rc file
+        shell = os.environ.get("SHELL", "/bin/bash")
+        if "zsh" in shell:
+            rc_file = Path.home() / ".zshrc"
+        else:
+            rc_file = Path.home() / ".bashrc"
+
+        path_line = 'export PATH="$HOME/bin:$PATH"'
+        # Check if already in rc file
+        rc_has_it = False
+        if rc_file.exists():
+            rc_has_it = path_line in rc_file.read_text()
+
+        if not rc_has_it:
+            with open(rc_file, "a") as f:
+                f.write(f"\n# Added by cs (claude-sessions)\n{path_line}\n")
+            print(f"{GREEN}Added ~/bin to PATH in {rc_file}{NC}")
+            print(f"{YELLOW}Run: source {rc_file}  (or open a new terminal){NC}")
+        else:
+            print(f"{DIM}~/bin already in {rc_file}{NC}")
+
+    print(f"\n{GREEN}Install complete! All set.{NC}")
+
+
 def cmd_help():
     print("""cs - Claude Sessions Manager
 
@@ -322,6 +475,7 @@ Usage:
   cs label <id> <text>  Label a session (id = PID or pts number)
   cs unlabel <id>       Remove a session label
   cs clean              Remove labels for dead sessions
+  cs install [dir]      One-click install (default: ~/bin)
   cs help               Show this help
 
 Examples:
@@ -330,6 +484,8 @@ Examples:
   cs label 528378 "fix bug"   # label session by PID
   cs unlabel 52               # remove label
   cs -a                       # show everyone's sessions
+  cs install                  # install to ~/bin
+  cs install /usr/local/bin   # install to custom dir
 
 Labels are stored by session_id and shown in the Claude Code statusline.
 When no manual label is set, cs auto-detects the task from history.""")
@@ -353,6 +509,8 @@ def main():
         cmd_unlabel(args[1])
     elif args[0] == "clean":
         cmd_clean()
+    elif args[0] == "install":
+        cmd_install(args[1] if len(args) > 1 else None)
     elif args[0] in ("help", "-h", "--help", "h"):
         cmd_help()
     else:
