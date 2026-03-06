@@ -314,26 +314,58 @@ def cmd_clean():
 
 
 def _prompt_choice(prompt_text, options, default=0):
-    """Interactive single-choice prompt. Returns selected option."""
+    """Interactive arrow-key menu. Falls back to number input if not a tty."""
+    if not sys.stdin.isatty():
+        # Non-interactive: use default
+        return options[default][1]
+
+    import tty
+    import termios
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    cur = default
+
+    def render():
+        for i, (label, _) in enumerate(options):
+            marker = f"{GREEN}>{NC}" if i == cur else " "
+            print(f"\r  {marker} {label}    ")
+        # Move cursor back up
+        sys.stdout.write(f"\033[{len(options)}A")
+        sys.stdout.flush()
+
     print(prompt_text)
-    for i, (label, _) in enumerate(options):
-        marker = f"{GREEN}>{NC}" if i == default else " "
-        print(f"  {marker} {i + 1}) {label}")
-    while True:
-        try:
-            raw = input(f"\nChoice [{default + 1}]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            sys.exit(0)
-        if raw == "":
-            return options[default][1]
-        try:
-            idx = int(raw) - 1
-            if 0 <= idx < len(options):
-                return options[idx][1]
-        except ValueError:
-            pass
-        print("Invalid choice, try again.")
+    print(f"{DIM}  ↑↓ to select, Enter to confirm{NC}")
+    render()
+
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch == "\r" or ch == "\n":
+                break
+            if ch == "\x03":  # Ctrl-C
+                raise KeyboardInterrupt
+            if ch == "\x1b":  # escape sequence
+                seq = sys.stdin.read(2)
+                if seq in ("[A", "OA"):  # up
+                    cur = (cur - 1) % len(options)
+                elif seq in ("[B", "OB"):  # down
+                    cur = (cur + 1) % len(options)
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            render()
+            tty.setraw(fd)
+    except (KeyboardInterrupt, EOFError):
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write(f"\033[{len(options)}B\n")
+        sys.exit(0)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    # Move past the menu and show selection
+    sys.stdout.write(f"\033[{len(options)}B\n")
+    print(f"  {GREEN}Selected: {options[cur][0]}{NC}")
+    return options[cur][1]
 
 
 def cmd_install(target_dir=None):
