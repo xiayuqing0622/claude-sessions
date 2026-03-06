@@ -16,10 +16,10 @@ cs -a     # all users (shared server)
 ```
 PID      TTY      TIME    PROJECT                          TASK
 -------  -------  ------ -------------------------------  --------------------
-123456   pts/1    2h40m   workspace/my-project             Issue1311规划处理
-234567   pts/2    23h5m   workspace/backend          [yolo] 修复数据库迁移
-345678   pts/70   1d6h    workspace/frontend                添加暗色模式
-456789   pts/26   1d7h    workspace/backend        [orphan] 检查仓库基础设施配置
+123456   pts/1    2h40m   workspace/my-project             fix auth module
+234567   pts/2    23h5m   workspace/backend          [yolo] database migration
+345678   pts/70   1d6h    workspace/frontend                add dark mode
+456789   pts/26   1d7h    workspace/backend        [orphan] refactor infra
 ```
 
 - **Green** = label in `session-labels.json` (manual or auto)
@@ -41,7 +41,7 @@ cs clean                            # remove labels for dead sessions
 A custom Claude Code statusline showing everything at a glance:
 
 ```
-🏷️ Issue1311规划处理  📁 workspace/my-project  🌿 feat/auth  🤖 Opus 4.6  📟 v2.1.70  🎨 concise
+🏷️ fix auth module  📁 workspace/my-project  🌿 feat/auth  🤖 Opus 4.6  📟 v2.1.70  🎨 concise
 🧠 Ctx: 56% [=====-----]  ⚡ Session: 40% used, resets in 2h 31m [====------]  📊 Weekly: 6% used, resets in 6d 15h [----------]
 ```
 
@@ -78,8 +78,8 @@ Examples:
 
 | First message | Auto-label |
 |---------------|------------|
-| 处理issue1311,好好plan,有问题一定要问我 | Issue1311规划处理 |
-| 这台机器上的别的用户安装这个项目，为什么usage limit没显示 | 其他用户usage limit显示问题 |
+| handle issue 1311, plan carefully, ask me if unclear | plan issue 1311 |
+| why is usage limit not showing for other users on this machine | debug usage limit display |
 | fix bug in auth | fix bug in auth |
 
 ### 5. Install & Upgrade
