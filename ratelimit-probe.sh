@@ -11,6 +11,20 @@ CREDS="$HOME/.claude/.credentials.json"
 LOCK="/tmp/.claude-ratelimit-probe.lock"
 TTL=120  # don't probe more often than every 2 minutes
 
+# Write an error status to cache so statusline can display diagnostics
+write_error_cache() {
+  local err_code="$1" err_msg="$2"
+  local now=$(date +%s)
+  if command -v jq >/dev/null 2>&1; then
+    jq -n --argjson now "$now" --arg code "$err_code" --arg msg "$err_msg" \
+      '{probeTime: $now, status: "error", error: $code, errorMsg: $msg}' > "$CACHE"
+  else
+    cat > "$CACHE" <<EJSON
+{"probeTime":${now},"status":"error","error":"${err_code}","errorMsg":"${err_msg}"}
+EJSON
+  fi
+}
+
 # Quick cache freshness check (synchronous, fast)
 if [ -f "$CACHE" ]; then
   cache_mtime=$(stat -c %Y "$CACHE" 2>/dev/null || stat -f %m "$CACHE" 2>/dev/null || echo 0)
@@ -36,8 +50,10 @@ fi
 
   # Read OAuth access token
   TOKEN=""
+  CREDS_FOUND=0
   # 1. Try credentials file (Linux)
   if [ -f "$CREDS" ]; then
+    CREDS_FOUND=1
     if command -v jq >/dev/null 2>&1; then
       TOKEN=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDS" 2>/dev/null)
     else
@@ -48,8 +64,16 @@ fi
   if [ -z "$TOKEN" ] && command -v security >/dev/null 2>&1; then
     TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
       | python3 -c "import sys,json; print(json.load(sys.stdin).get('claudeAiOauth',{}).get('accessToken',''))" 2>/dev/null)
+    [ -n "$TOKEN" ] && CREDS_FOUND=1
   fi
-  [ -z "$TOKEN" ] && exit 1
+  if [ -z "$TOKEN" ]; then
+    if [ "$CREDS_FOUND" -eq 0 ]; then
+      write_error_cache "no_credentials" "$CREDS not found. Log in: claude auth login"
+    else
+      write_error_cache "no_token" "OAuth token not found in $CREDS. Try: claude auth logout && claude auth login"
+    fi
+    exit 1
+  fi
 
   # Minimal API call (Haiku, 1 token) — just to get rate limit headers
   RESP=$(curl -sS -i --max-time 10 \
@@ -61,7 +85,21 @@ fi
     -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"."}]}' \
     2>/dev/null)
 
-  [ -z "$RESP" ] && exit 1
+  if [ -z "$RESP" ]; then
+    write_error_cache "api_failed" "API request failed. Check network or proxy settings"
+    exit 1
+  fi
+
+  # Check for HTTP error status
+  http_status=$(echo "$RESP" | head -1 | grep -o '[0-9]\{3\}')
+  if [ -n "$http_status" ] && [ "$http_status" -ge 400 ] 2>/dev/null; then
+    case "$http_status" in
+      401) write_error_cache "auth_expired" "OAuth token expired. Try: claude auth logout && claude auth login" ;;
+      403) write_error_cache "auth_forbidden" "Access denied (HTTP 403). Check your subscription status" ;;
+      *)   write_error_cache "api_http_${http_status}" "API returned HTTP ${http_status}" ;;
+    esac
+    exit 1
+  fi
 
   # Helper: extract a response header value (case-insensitive)
   hdr() { echo "$RESP" | grep -i "^$1:" | head -1 | sed 's/^[^:]*: *//' | tr -d '\r\n'; }
@@ -115,7 +153,7 @@ fi
   else
     # Fallback: python3
     python3 - "$now" "$status" "$reset_at" "$claim" "$fallback" \
-      "$ovs" "$ovr" "$u5h" "$r5h" "$u7d" "$r7d" "$CACHE" <<'PY'
+      "$overage_status" "$overage_reset" "$u5h" "$r5h" "$u7d" "$r7d" "$CACHE" <<'PY'
 import json, sys
 a = sys.argv[1:]
 def num(s):

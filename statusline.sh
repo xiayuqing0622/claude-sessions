@@ -194,9 +194,17 @@ rl_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;158m'; fi; }  # d
 rl_weekly_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;153m'; fi; }  # default light blue
 
 RATELIMIT_CACHE="$HOME/.claude/ratelimit-cache.json"
+rl_error_msg=""
+rl_error_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;215m'; fi; }  # peach/warning
 if [ -f "$RATELIMIT_CACHE" ] && [ "$HAS_JQ" -eq 1 ]; then
   rl_json=$(cat "$RATELIMIT_CACHE" 2>/dev/null)
   rl_status=$(echo "$rl_json" | jq -r '.status // "unknown"' 2>/dev/null)
+
+  # Handle probe errors — show diagnostic hint in statusline
+  if [ "$rl_status" = "error" ]; then
+    rl_error_msg=$(echo "$rl_json" | jq -r '.errorMsg // "unknown error"' 2>/dev/null)
+  fi
+
   rl_reset=$(echo "$rl_json" | jq -r '.resetsAt // empty' 2>/dev/null)
 
   # Session (5-hour) utilization
@@ -314,8 +322,10 @@ if [ -z "$line2" ] && [ -z "$context_pct" ]; then
   line2="🧠 $(context_color)Ctx: TBD$(rst)"
 fi
 
-# Usage limit: session (5h)
-if [ -n "$rl_session_txt" ]; then
+# Usage limit: error or session (5h)
+if [ -n "$rl_error_msg" ]; then
+  line2="${line2}  ⚠️ $(rl_error_color)Usage: ${rl_error_msg}$(rst)"
+elif [ -n "$rl_session_txt" ]; then
   line2="${line2}  ⚡ $(rl_color)Session: ${rl_session_txt} [${rl_session_bar}]$(rst)"
 fi
 
