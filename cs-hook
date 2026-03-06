@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""cs-hook - Auto-label Claude session on first tool use.
+
+Called by Claude Code's PreToolUse hook. Reads the session's first
+user message from history.jsonl and saves it as the session label.
+Only runs once per session (skips if label already exists).
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+LABELS_FILE = Path.home() / ".claude" / "session-labels.json"
+HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
+
+
+def get_session_id():
+    """Find session_id by walking up process tree to find claude, then matching in history."""
+    # Walk up to find the parent claude process
+    ppid = os.getppid()
+    claude_pid = None
+    while ppid > 1:
+        try:
+            comm = Path(f"/proc/{ppid}/comm").read_text().strip()
+        except OSError:
+            break
+        if comm == "claude":
+            claude_pid = ppid
+            break
+        try:
+            stat = Path(f"/proc/{ppid}/stat").read_text()
+            ppid = int(stat.split()[3])
+        except (OSError, IndexError, ValueError):
+            break
+
+    if not claude_pid:
+        return None, None
+
+    # Get claude's cwd and start time
+    try:
+        cwd = os.readlink(f"/proc/{claude_pid}/cwd")
+        stat_time = os.stat(f"/proc/{claude_pid}").st_mtime
+    except OSError:
+        return None, None
+
+    # Find matching session in history
+    if not HISTORY_FILE.exists():
+        return None, None
+
+    best_sid = None
+    best_diff = float("inf")
+    best_display = ""
+
+    with open(HISTORY_FILE, "r") as f:
+        for line in f:
+            try:
+                msg = json.loads(line.strip())
+            except Exception:
+                continue
+            if msg.get("project", "") != cwd:
+                continue
+            sid = msg.get("sessionId", "")
+            ts = msg.get("timestamp", 0) / 1000
+            diff = abs(ts - stat_time)
+            if diff < best_diff:
+                best_diff = diff
+                best_sid = sid
+                best_display = msg.get("display", "")
+
+    if best_sid and best_diff < 300:
+        return best_sid, best_display
+    return None, None
+
+
+def main():
+    session_id, first_message = get_session_id()
+    if not session_id or not first_message:
+        return
+
+    # Load existing labels
+    labels = {}
+    if LABELS_FILE.exists():
+        try:
+            labels = json.loads(LABELS_FILE.read_text())
+        except Exception:
+            pass
+
+    # Skip if already labeled
+    if session_id in labels:
+        return
+
+    # Auto-label with first message (truncated)
+    text = first_message.split("\n")[0]
+    if len(text) > 60:
+        text = text[:57] + "..."
+
+    labels[session_id] = text
+    LABELS_FILE.write_text(json.dumps(labels, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
