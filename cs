@@ -344,6 +344,12 @@ def cmd_install(target_dir=None):
     cs_src = script_dir / "cs"
     cs_hook_src = script_dir / "cs-hook"
     statusline_src = script_dir / "statusline.sh"
+    # When running from installed copy (~/bin), statusline.sh is in ~/.claude
+    if not statusline_src.exists():
+        statusline_src = Path.home() / ".claude" / "statusline.sh"
+    if not statusline_src.exists():
+        print(f"{YELLOW}statusline.sh not found. Run install from the git repo directory.{NC}")
+        sys.exit(1)
 
     # --- Bin dir: default ~/bin, or user-specified ---
     if target_dir:
