@@ -21,14 +21,33 @@ fi
 # Background the actual probe so we don't block Claude Code
 (
   # File lock to prevent concurrent probes
-  exec 9>"$LOCK"
-  flock -n 9 || exit 0
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK"
+    flock -n 9 || exit 0
+  else
+    # macOS: simple lock file with staleness check
+    if [ -f "$LOCK" ]; then
+      lock_age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) ))
+      [ "$lock_age" -lt 30 ] && exit 0
+    fi
+    echo $$ > "$LOCK"
+    trap 'rm -f "$LOCK"' EXIT
+  fi
 
   # Read OAuth access token
-  if command -v jq >/dev/null 2>&1; then
-    TOKEN=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDS" 2>/dev/null)
-  else
-    TOKEN=$(python3 -c "import json; print(json.load(open('$CREDS')).get('claudeAiOauth',{}).get('accessToken',''))" 2>/dev/null)
+  TOKEN=""
+  # 1. Try credentials file (Linux)
+  if [ -f "$CREDS" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      TOKEN=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDS" 2>/dev/null)
+    else
+      TOKEN=$(python3 -c "import json; print(json.load(open('$CREDS')).get('claudeAiOauth',{}).get('accessToken',''))" 2>/dev/null)
+    fi
+  fi
+  # 2. Try macOS Keychain
+  if [ -z "$TOKEN" ] && command -v security >/dev/null 2>&1; then
+    TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('claudeAiOauth',{}).get('accessToken',''))" 2>/dev/null)
   fi
   [ -z "$TOKEN" ] && exit 1
 
