@@ -1,22 +1,88 @@
 # cs - Claude Sessions Manager
 
-A CLI tool to track and label your parallel Claude Code sessions.
+Track, label, and monitor your parallel Claude Code sessions.
 
-## The Problem
+## Features
 
-When running multiple Claude Code sessions simultaneously, it's hard to remember which terminal is doing what.
+### 1. Session Dashboard (`cs`)
 
-## The Solution
+List all active Claude Code sessions on the machine:
 
-`cs` shows all your active Claude sessions with:
-- PID, terminal (pts), and runtime
-- Working directory / project name
-- **Auto-detected task** from session history (summarized by Haiku if long)
-- **Manual labels** that persist across restarts
-- **Orphan detection** — marks sessions whose parent terminal/IDE has died
-- **Usage limit monitoring** — real-time session and weekly utilization in the statusline
+```bash
+cs        # your sessions
+cs -a     # all users (shared server)
+```
 
-## Install
+```
+PID      TTY      TIME    PROJECT                          TASK
+-------  -------  ------ -------------------------------  --------------------
+123456   pts/1    2h40m   workspace/my-project             Issue1311规划处理
+234567   pts/2    23h5m   workspace/backend          [yolo] 修复数据库迁移
+345678   pts/70   1d6h    workspace/frontend                添加暗色模式
+456789   pts/26   1d7h    workspace/backend        [orphan] 检查仓库基础设施配置
+```
+
+- **Green** = label in `session-labels.json` (manual or auto)
+- **Dim** = auto-detected from history at query time
+- **Red `[orphan]`** = parent terminal/IDE has died, process still running
+- `[wt]` = `--worktree` mode, `[yolo]` = `--dangerously-skip-permissions`
+
+Manual labeling:
+
+```bash
+cs label 52 "refactor MoE layer"   # by pts number
+cs label 528378 "fix attention bug" # by PID
+cs unlabel 52                       # remove
+cs clean                            # remove labels for dead sessions
+```
+
+### 2. Rich Statusline
+
+A custom Claude Code statusline showing everything at a glance:
+
+```
+🏷️ Issue1311规划处理  📁 workspace/my-project  🌿 feat/auth  🤖 Opus 4.6  📟 v2.1.70  🎨 concise
+🧠 Ctx: 56% [=====-----]  ⚡ Session: 40% used, resets in 2h 31m [====------]  📊 Weekly: 6% used, resets in 6d 15h [----------]
+```
+
+**Line 1** — Session label, working directory, git branch, model, Claude Code version, output style
+
+**Line 2** — Context window remaining, session (5h) usage limit, weekly (7d) usage limit
+
+### 3. Usage Limit Monitoring
+
+Real-time usage limits from the Anthropic API, displayed in the statusline:
+
+- **Session (5h)** — current 5-hour window utilization
+- **Weekly (7d)** — 7-day rolling utilization
+- Color-coded: mint (normal) → peach (>=70%) → red (>=90% or limit hit)
+
+A PostToolUse hook (`ratelimit-probe.sh`) makes a minimal background API call (1 Haiku token) every 2 minutes to fetch rate limit headers. If something goes wrong, the statusline shows actionable diagnostics:
+
+```
+⚠️ Usage: ~/.claude/.credentials.json not found. Log in: claude auth login
+⚠️ Usage: OAuth token expired. Try: claude auth logout && claude auth login
+⚠️ Usage: API request failed. Check network or proxy settings
+```
+
+### 4. Smart Auto-labeling
+
+A PreToolUse hook (`cs-hook`) automatically labels each session on first tool use:
+
+- Short messages (<=30 chars) → used directly as the label
+- Long messages → **summarized by Haiku** into a concise label (~30 chars, same language)
+- Labels appear in both `cs` output and the statusline
+- Only runs once per session, cost is negligible
+
+Examples:
+
+| First message | Auto-label |
+|---------------|------------|
+| 处理issue1311,好好plan,有问题一定要问我 | Issue1311规划处理 |
+| 这台机器上的别的用户安装这个项目，为什么usage limit没显示 | 其他用户usage limit显示问题 |
+| fix bug in auth | fix bug in auth |
+
+### 5. Install & Upgrade
 
 ```bash
 git clone https://github.com/xiayuqing0622/claude-sessions.git
@@ -24,112 +90,25 @@ cd claude-sessions
 ./cs install
 ```
 
-The installer will:
-- **Symlink** `cs` and `cs-hook` to `~/bin` (updates to the repo take effect immediately)
-- **Symlink** `statusline.sh` and `ratelimit-probe.sh` to `~/.claude/`
-- Configure `~/.claude/settings.json` (statusLine + auto-label hook + usage limit probe)
-- Add `~/bin` to `PATH` in your shell rc if needed
-- Save install metadata to `~/.claude/cs-install.json` for upgrade checks
+The installer:
+- **Symlinks** `cs`, `cs-hook` to `~/bin` and `statusline.sh`, `ratelimit-probe.sh` to `~/.claude/`
+- Configures `~/.claude/settings.json` (statusLine + hooks)
+- Adds `~/bin` to `PATH` if needed
+- Falls back to file copy if symlinks aren't possible (cross-device, etc.)
 
-Falls back to file copy if symlinks aren't possible (e.g. cross-device).
-
-If a project-level `.claude` directory is detected, you'll be asked which one to inject settings into (default: `~/.claude` for all projects).
-
-To install to a custom bin directory: `./cs install /usr/local/bin`
-
-### Upgrading
-
-With symlink-based install, pulling the repo is enough — no re-install needed:
+**Upgrading** — with symlinks, just pull:
 
 ```bash
 cd claude-sessions && git pull
 ```
 
-If installed via copy (fallback), `cs` will warn you on startup:
+If installed via copy, `cs` warns on startup:
 
 ```
 cs: statusline.sh, cs-hook outdated. Run: cs install
 ```
 
-Re-run `cs install` to update.
-
-## Usage
-
-```bash
-# List your active Claude sessions
-cs
-
-# List all users' sessions (shared server)
-cs -a
-
-# Label a session by pts number
-cs label 52 "refactor MoE layer"
-
-# Label a session by PID
-cs label 528378 "fix attention bug"
-
-# Remove a label
-cs unlabel 52
-
-# Clean up labels for dead sessions
-cs clean
-```
-
-## Example Output
-
-```
-PID      TTY      TIME    PROJECT                          TASK
--------  -------  ------ -------------------------------  --------------------
-123456   pts/1    2h40m   workspace/my-project             Issue1311规划处理
-234567   pts/2    23h5m   workspace/backend          [yolo] 修复数据库迁移
-345678   pts/3    1h12m   workspace/frontend                添加暗色模式
-456789   pts/26   1d7h    workspace/backend        [orphan] 检查仓库基础设施配置
-```
-
-- **Green** text = label persisted in `session-labels.json` (manual or auto-set by cs-hook)
-- **Dim** text = auto-detected from history at query time
-- **Red `[orphan]`** = parent terminal/IDE has died, process is orphaned
-- `[wt]` = using `--worktree` flag
-- `[yolo]` = using `--dangerously-skip-permissions`
-
-## Auto-labeling
-
-When a session triggers its first tool use, `cs-hook` (PreToolUse hook) automatically:
-1. Matches the session by project directory and start time
-2. If the first message is short (<=30 chars), uses it directly
-3. If long, calls **Haiku** to summarize into a concise label (same language as input)
-4. Writes the label to `~/.claude/session-labels.json`
-
-This label then appears in both `cs` output and the Claude Code statusline.
-
-## Statusline Integration
-
-The statusline shows in every Claude Code session:
-
-```
-🏷️ Issue1311规划处理  📁 workspace/my-project  🌿 main  🤖 Opus 4.6  📟 v2.1.70
-🧠 Ctx: 56% [=====-----]  ⚡ Session: 40% used, resets in 2h 31m [====------]  📊 Weekly: 6% used, resets in 6d 15h [----------]
-```
-
-## Usage Limit Monitoring
-
-The statusline shows real-time usage limits from the Anthropic API:
-
-- **Session (5h)** — your current 5-hour usage window utilization
-- **Weekly (7d)** — your 7-day rolling usage utilization
-- Color-coded: mint (normal) → peach (>=70%) → red (>=90% or limit hit)
-
-This works by a PostToolUse hook (`ratelimit-probe.sh`) that makes a minimal background API call (1 Haiku token) every 2 minutes to fetch `anthropic-ratelimit-unified-*` response headers.
-
-### Error diagnostics
-
-If the probe fails (missing credentials, expired token, network issues), the statusline shows actionable hints instead of a blank space:
-
-```
-⚠️ Usage: ~/.claude/.credentials.json not found. Log in: claude auth login
-⚠️ Usage: OAuth token expired. Try: claude auth logout && claude auth login
-⚠️ Usage: API request failed. Check network or proxy settings
-```
+Custom bin directory: `./cs install /usr/local/bin`
 
 ## Requirements
 
