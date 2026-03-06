@@ -70,8 +70,7 @@ def get_session_id():
     # Among sessions starting within 300s of process start, pick most recently active
     candidates = []
     for sid, info in sessions.items():
-        diff = abs(info["first_ts"] - stat_time)
-        if diff < 300:
+        if info["first_ts"] >= stat_time - 60:
             candidates.append((-info["last_ts"], sid, info["display"]))
     candidates.sort()
 

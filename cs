@@ -168,10 +168,9 @@ def get_session_ids_for_project(cwd, pid_start_epoch):
     # Find sessions whose first message is within 300s of process start
     candidates = []
     for sid, info in sessions.items():
-        diff = abs(info["first_ts"] - pid_start_epoch)
-        if diff < 300:
-            # Sort by most recent activity (descending), not by timestamp proximity
-            candidates.append((-info["last_ts"], sid, info["display"]))
+        if info["first_ts"] >= pid_start_epoch - 60:
+            # Sort by most recently created (descending)
+            candidates.append((-info["first_ts"], sid, info["display"]))
     candidates.sort()
     return candidates
 
@@ -203,12 +202,38 @@ def cmd_list(show_all=False):
         return
 
     labels = load_labels()
+    now = time.time()
+
+    # Assign sessions to processes: newest process claims first to avoid duplicates
+    proc_indices_by_age = sorted(range(len(procs)), key=lambda i: procs[i]["elapsed_s"])
+    claimed_sids = set()
+    proc_labels = {}  # index -> (label_text, is_manual)
+
+    for i in proc_indices_by_age:
+        p = procs[i]
+        pid_start = now - p["elapsed_s"]
+        candidates = get_session_ids_for_project(p["cwd"], pid_start)
+        label_text, is_manual = "", False
+        for _, sid, display in candidates:
+            if sid in claimed_sids:
+                continue
+            claimed_sids.add(sid)
+            if sid in labels:
+                label_text, is_manual = labels[sid], True
+            else:
+                text = display.split("\n")[0]
+                if len(text) > 72:
+                    text = text[:69] + "..."
+                if text:
+                    label_text = text
+            break
+        proc_labels[i] = (label_text, is_manual)
 
     # Header
     print(f"{BOLD}{'PID':<8} {'TTY':<8} {'TIME':<7} {'PROJECT':<32} TASK{NC}")
     print(f"{'─'*7}  {'─'*7}  {'─'*6} {'─'*31}  {'─'*20}")
 
-    for p in procs:
+    for i, p in enumerate(procs):
         pid = p["pid"]
         tty = p["tty"]
         duration = format_duration(p["elapsed_s"])
@@ -222,7 +247,7 @@ def cmd_list(show_all=False):
         elif "--dangerously-skip-permissions" in p["flags"]:
             flags += f" {DIM}[yolo]{NC}"
 
-        label, is_manual = get_label_for_process(labels, p["cwd"], p["elapsed_s"])
+        label, is_manual = proc_labels.get(i, ("", False))
 
         if is_manual:
             task_display = f"{GREEN}{label}{NC}"
