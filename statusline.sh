@@ -186,55 +186,87 @@ if [ "$HAS_JQ" -eq 1 ]; then
   fi
 fi
 
-session_color() { 
-  rem_pct=$(( 100 - session_pct ))
-  if   (( rem_pct <= 10 )); then SCLR='38;5;210'  # light pink
-  elif (( rem_pct <= 25 )); then SCLR='38;5;228'  # light yellow  
-  else                          SCLR='38;5;194'; fi  # light green
-  if [ "$use_color" -eq 1 ]; then printf '\033[%sm' "$SCLR"; fi
-}
+# ---- usage limit (from ratelimit-probe.sh cache) ----
+rl_session_txt=""; rl_session_pct=0; rl_session_bar=""
+rl_weekly_txt=""; rl_weekly_pct=0; rl_weekly_bar=""
+rl_status=""
+rl_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;158m'; fi; }  # default mint
+rl_weekly_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;153m'; fi; }  # default light blue
 
-# ---- session reset time (ccusage) ----
-session_txt=""; session_pct=0; session_bar=""
+RATELIMIT_CACHE="$HOME/.claude/ratelimit-cache.json"
+if [ -f "$RATELIMIT_CACHE" ] && [ "$HAS_JQ" -eq 1 ]; then
+  rl_json=$(cat "$RATELIMIT_CACHE" 2>/dev/null)
+  rl_status=$(echo "$rl_json" | jq -r '.status // "unknown"' 2>/dev/null)
+  rl_reset=$(echo "$rl_json" | jq -r '.resetsAt // empty' 2>/dev/null)
 
-# Session reset time requires ccusage (only feature that needs external tool)
-if command -v ccusage >/dev/null 2>&1 && [ "$HAS_JQ" -eq 1 ]; then
-  blocks_output=""
+  # Session (5-hour) utilization
+  rl_s_util=$(echo "$rl_json" | jq -r '.session.utilization // empty' 2>/dev/null)
+  rl_s_reset=$(echo "$rl_json" | jq -r '.session.resetsAt // empty' 2>/dev/null)
 
-  # Try ccusage with timeout
-  if command -v timeout >/dev/null 2>&1; then
-    blocks_output=$(timeout 5s ccusage blocks --json 2>/dev/null)
-  elif command -v gtimeout >/dev/null 2>&1; then
-    blocks_output=$(gtimeout 5s ccusage blocks --json 2>/dev/null)
-  else
-    blocks_output=$(ccusage blocks --json 2>/dev/null)
+  if [ -n "$rl_s_util" ] && [ "$rl_s_util" != "null" ]; then
+    rl_session_pct=$(echo "$rl_s_util" | awk '{printf "%d", $1 * 100}')
+    rl_session_bar=$(progress_bar "$rl_session_pct" 10)
+    if [ -n "$rl_s_reset" ] && [ "$rl_s_reset" != "null" ]; then
+      now_sec=$(date +%s)
+      rl_s_reset_int=$(printf '%.0f' "$rl_s_reset")
+      rl_remaining=$(( rl_s_reset_int - now_sec ))
+      (( rl_remaining < 0 )) && rl_remaining=0
+      rl_rh=$(( rl_remaining / 3600 )); rl_rm=$(( (rl_remaining % 3600) / 60 ))
+      rl_session_txt="${rl_session_pct}% used, resets in ${rl_rh}h ${rl_rm}m"
+    else
+      rl_session_txt="${rl_session_pct}% used"
+    fi
+    # Color based on utilization
+    if [ "$rl_session_pct" -ge 90 ]; then
+      rl_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;203m'; fi; }  # coral red
+    elif [ "$rl_session_pct" -ge 70 ]; then
+      rl_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;215m'; fi; }  # peach
+    fi
   fi
 
-  if [ -n "$blocks_output" ]; then
-    active_block=$(echo "$blocks_output" | jq -c '.blocks[] | select(.isActive == true)' 2>/dev/null | head -n1)
-    if [ -n "$active_block" ]; then
-      # Session time calculation from ccusage
-      reset_time_str=$(echo "$active_block" | jq -r '.usageLimitResetTime // .endTime // empty')
-      start_time_str=$(echo "$active_block" | jq -r '.startTime // empty')
+  # Rejected state (hit the limit)
+  if [ "$rl_status" = "rejected" ]; then
+    rl_session_pct=100
+    rl_session_bar=$(progress_bar 100 10)
+    if [ -n "$rl_reset" ] && [ "$rl_reset" != "null" ]; then
+      now_sec=$(date +%s)
+      rl_reset_int=$(printf '%.0f' "$rl_reset")
+      rl_remaining=$(( rl_reset_int - now_sec ))
+      (( rl_remaining < 0 )) && rl_remaining=0
+      rl_rh=$(( rl_remaining / 3600 )); rl_rm=$(( (rl_remaining % 3600) / 60 ))
+      rl_session_txt="LIMIT HIT, resets in ${rl_rh}h ${rl_rm}m"
+    else
+      rl_session_txt="LIMIT HIT"
+    fi
+    rl_color() { if [ "$use_color" -eq 1 ]; then printf '\033[1;38;5;203m'; fi; }  # bold red
+  fi
 
-      if [ -n "$reset_time_str" ] && [ -n "$start_time_str" ]; then
-        start_sec=$(to_epoch "$start_time_str"); end_sec=$(to_epoch "$reset_time_str"); now_sec=$(date +%s)
-        total=$(( end_sec - start_sec )); (( total<1 )) && total=1
-        elapsed=$(( now_sec - start_sec )); (( elapsed<0 ))&&elapsed=0; (( elapsed>total ))&&elapsed=$total
-        session_pct=$(( elapsed * 100 / total ))
-        remaining=$(( end_sec - now_sec )); (( remaining<0 )) && remaining=0
-        rh=$(( remaining / 3600 )); rm=$(( (remaining % 3600) / 60 ))
-        end_hm=$(fmt_time_hm "$end_sec")
-        session_txt="$(printf '%dh %dm until reset at %s (%d%%)' "$rh" "$rm" "$end_hm" "$session_pct")"
-        session_bar=$(progress_bar "$session_pct" 10)
-      fi
+  # Weekly (7-day) utilization
+  rl_w_util=$(echo "$rl_json" | jq -r '.weekly.utilization // empty' 2>/dev/null)
+  rl_w_reset=$(echo "$rl_json" | jq -r '.weekly.resetsAt // empty' 2>/dev/null)
+
+  if [ -n "$rl_w_util" ] && [ "$rl_w_util" != "null" ]; then
+    rl_weekly_pct=$(echo "$rl_w_util" | awk '{printf "%d", $1 * 100}')
+    rl_weekly_bar=$(progress_bar "$rl_weekly_pct" 10)
+    if [ -n "$rl_w_reset" ] && [ "$rl_w_reset" != "null" ]; then
+      now_sec=$(date +%s)
+      rl_w_reset_int=$(printf '%.0f' "$rl_w_reset")
+      rl_w_remaining=$(( rl_w_reset_int - now_sec ))
+      (( rl_w_remaining < 0 )) && rl_w_remaining=0
+      rl_wd=$(( rl_w_remaining / 86400 )); rl_wh=$(( (rl_w_remaining % 86400) / 3600 ))
+      rl_weekly_txt="${rl_weekly_pct}% used, resets in ${rl_wd}d ${rl_wh}h"
+    else
+      rl_weekly_txt="${rl_weekly_pct}% used"
+    fi
+    if [ "$rl_weekly_pct" -ge 80 ]; then
+      rl_weekly_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;215m'; fi; }  # peach
     fi
   fi
 fi
 
 # ---- log extracted data ----
 {
-  echo "[$TIMESTAMP] Extracted: dir=${current_dir:-}, model=${model_name:-}, version=${model_version:-}, git=${git_branch:-}, context=${context_pct:-}, session_pct=${session_pct:-}"
+  echo "[$TIMESTAMP] Extracted: dir=${current_dir:-}, model=${model_name:-}, version=${model_version:-}, git=${git_branch:-}, context=${context_pct:-}, rl_status=${rl_status:-}, rl_session=${rl_session_pct:-}%, rl_weekly=${rl_weekly_pct:-}%"
   if [ "$HAS_JQ" -eq 0 ]; then
     echo "[$TIMESTAMP] Note: Context, tokens, and session info require jq for full functionality"
   fi
@@ -272,22 +304,25 @@ if [ -n "$output_style" ] && [ "$output_style" != "null" ]; then
   printf '  🎨 %s%s%s' "$(style_color)" "$output_style" "$(rst)"
 fi
 
-# Line 2: Context and usage
+# Line 2: Context and usage limits
 line2=""
 if [ -n "$context_pct" ]; then
   context_bar=$(progress_bar "$context_remaining_pct" 10)
-  line2="🧠 $(context_color)Context Remaining: ${context_pct} [${context_bar}]$(rst)"
+  line2="🧠 $(context_color)Ctx: ${context_pct} [${context_bar}]$(rst)"
 fi
 if [ -z "$line2" ] && [ -z "$context_pct" ]; then
-  line2="🧠 $(context_color)Context Remaining: TBD$(rst)"
+  line2="🧠 $(context_color)Ctx: TBD$(rst)"
 fi
 
-
-# Session time (from ccusage)
-if [ -n "$session_txt" ]; then
-  line2="${line2}  ⌛ $(session_color)${session_txt}$(rst) $(session_color)[${session_bar}]$(rst)"
+# Usage limit: session (5h)
+if [ -n "$rl_session_txt" ]; then
+  line2="${line2}  ⚡ $(rl_color)Session: ${rl_session_txt} [${rl_session_bar}]$(rst)"
 fi
 
+# Usage limit: weekly (7d)
+if [ -n "$rl_weekly_txt" ]; then
+  line2="${line2}  📊 $(rl_weekly_color)Weekly: ${rl_weekly_txt} [${rl_weekly_bar}]$(rst)"
+fi
 
 # Print lines
 if [ -n "$line2" ]; then

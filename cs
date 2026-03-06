@@ -376,9 +376,12 @@ def cmd_install(target_dir=None):
     cs_src = script_dir / "cs"
     cs_hook_src = script_dir / "cs-hook"
     statusline_src = script_dir / "statusline.sh"
-    # When running from installed copy (~/bin), statusline.sh is in ~/.claude
+    ratelimit_probe_src = script_dir / "ratelimit-probe.sh"
+    # When running from installed copy (~/bin), assets are in ~/.claude
     if not statusline_src.exists():
         statusline_src = Path.home() / ".claude" / "statusline.sh"
+    if not ratelimit_probe_src.exists():
+        ratelimit_probe_src = Path.home() / ".claude" / "ratelimit-probe.sh"
     if not statusline_src.exists():
         print(f"{YELLOW}statusline.sh not found. Run install from the git repo directory.{NC}")
         sys.exit(1)
@@ -440,6 +443,20 @@ def cmd_install(target_dir=None):
         sl_dst.chmod(sl_dst.stat().st_mode | 0o755)
         print(f"{GREEN}Installed {sl_dst}{NC}")
 
+    # Copy ratelimit-probe.sh into chosen .claude dir
+    rl_dst = claude_dir / "ratelimit-probe.sh"
+    if ratelimit_probe_src.exists():
+        if ratelimit_probe_src.resolve() == rl_dst.resolve():
+            print(f"{DIM}{rl_dst} already up to date{NC}")
+        else:
+            if rl_dst.is_symlink():
+                rl_dst.unlink()
+            shutil.copy2(ratelimit_probe_src, rl_dst)
+            rl_dst.chmod(rl_dst.stat().st_mode | 0o755)
+            print(f"{GREEN}Installed {rl_dst}{NC}")
+    else:
+        print(f"{DIM}ratelimit-probe.sh not found, skipping usage limit probe{NC}")
+
     # Update settings.json in chosen .claude dir
     settings_file = claude_dir / "settings.json"
     settings = {}
@@ -479,6 +496,28 @@ def cmd_install(target_dir=None):
         print(f"{GREEN}Added cs-hook to PreToolUse hooks{NC}")
     else:
         print(f"{DIM}cs-hook already in PreToolUse hooks{NC}")
+
+    # Add ratelimit-probe.sh to PostToolUse hooks
+    if rl_dst.exists():
+        rl_probe_cmd = str(rl_dst)
+        post_tool = hooks.setdefault("PostToolUse", [])
+
+        catch_all_post = None
+        for entry in post_tool:
+            if entry.get("matcher", "") == "":
+                catch_all_post = entry
+                break
+        if catch_all_post is None:
+            catch_all_post = {"matcher": "", "hooks": []}
+            post_tool.append(catch_all_post)
+
+        post_hook_list = catch_all_post.setdefault("hooks", [])
+        already_rl = any(h.get("command", "").endswith("ratelimit-probe.sh") for h in post_hook_list)
+        if not already_rl:
+            post_hook_list.append({"type": "command", "command": rl_probe_cmd})
+            print(f"{GREEN}Added ratelimit-probe to PostToolUse hooks{NC}")
+        else:
+            print(f"{DIM}ratelimit-probe already in PostToolUse hooks{NC}")
 
     settings_file.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
     print(f"{GREEN}Updated {settings_file}{NC}")
