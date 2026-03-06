@@ -19,6 +19,7 @@ MY_USER = os.environ.get("USER", "")
 GREEN = "\033[0;32m"
 YELLOW = "\033[1;33m"
 CYAN = "\033[0;36m"
+RED = "\033[0;31m"
 DIM = "\033[2m"
 BOLD = "\033[1m"
 NC = "\033[0m"
@@ -60,6 +61,20 @@ def get_claude_processes(show_all=False):
             cwd = os.readlink(f"/proc/{pid}/cwd")
         except OSError:
             cwd = "?"
+        # Detect orphaned sessions: walk parent chain, if any ancestor has ppid=1
+        # it means the terminal/shell that spawned claude has died
+        orphan = False
+        try:
+            ppid = int(open(f"/proc/{pid}/stat").read().split()[3])
+            if ppid == 1:
+                orphan = True
+            else:
+                # Check parent's ppid — catches cases like bash(ppid=1) -> claude
+                gppid = int(open(f"/proc/{ppid}/stat").read().split()[3])
+                if gppid == 1:
+                    orphan = True
+        except (OSError, ValueError, IndexError):
+            pass
         flags = " ".join(args[1:]) if len(args) > 1 else ""
         procs.append({
             "uid": int(uid),
@@ -69,6 +84,7 @@ def get_claude_processes(show_all=False):
             "user": user,
             "cwd": cwd,
             "flags": flags,
+            "orphan": orphan,
         })
     return procs
 
@@ -112,16 +128,19 @@ def get_session_ids_for_project(cwd, pid_start_epoch):
                 sid = msg.get("sessionId", "")
                 ts = msg.get("timestamp", 0) / 1000
                 if sid not in sessions:
-                    sessions[sid] = {"ts": ts, "display": msg.get("display", "")}
+                    sessions[sid] = {"first_ts": ts, "last_ts": ts, "display": msg.get("display", "")}
+                else:
+                    sessions[sid]["last_ts"] = ts
     except Exception:
         return []
 
-    # Find session closest to process start time
+    # Find sessions whose first message is within 300s of process start
     candidates = []
     for sid, info in sessions.items():
-        diff = abs(info["ts"] - pid_start_epoch)
+        diff = abs(info["first_ts"] - pid_start_epoch)
         if diff < 300:
-            candidates.append((diff, sid, info["display"]))
+            # Sort by most recent activity (descending), not by timestamp proximity
+            candidates.append((-info["last_ts"], sid, info["display"]))
     candidates.sort()
     return candidates
 
@@ -165,10 +184,12 @@ def cmd_list(show_all=False):
         project = short_project(p["cwd"])
 
         flags = ""
+        if p.get("orphan"):
+            flags += f" {RED}[orphan]{NC}"
         if "--worktree" in p["flags"]:
-            flags = f" {DIM}[wt]{NC}"
+            flags += f" {DIM}[wt]{NC}"
         elif "--dangerously-skip-permissions" in p["flags"]:
-            flags = f" {DIM}[yolo]{NC}"
+            flags += f" {DIM}[yolo]{NC}"
 
         label, is_manual = get_label_for_process(labels, p["cwd"], p["elapsed_s"])
 
