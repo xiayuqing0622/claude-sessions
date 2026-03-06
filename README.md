@@ -24,7 +24,8 @@ cd claude-sessions
 
 That's it — one command, zero interaction. The installer will:
 - Copy `cs` and `cs-hook` to `~/bin`
-- Copy `statusline.sh` and configure `~/.claude/settings.json` (statusLine + auto-label hook)
+- Copy `statusline.sh` and `ratelimit-probe.sh` to `~/.claude/`
+- Configure `~/.claude/settings.json` (statusLine + auto-label hook + usage limit probe)
 - Add `~/bin` to `PATH` in your shell rc if needed
 
 If a project-level `.claude` directory is detected, you'll be asked which one to inject settings into (default: `~/.claude` for all projects).
@@ -74,12 +75,23 @@ PID      TTY      TIME    PROJECT                          TASK
 When you label a session with `cs label`, the label automatically shows in that session's Claude Code statusline:
 
 ```
-🏷️ refactor auth module  📁 workspace/my-project  🌿 main  🤖 Opus 4.6  📟 v2.1.69
-🧠 Context Remaining: 56% [=====-----]
+🏷️ refactor auth module  📁 workspace/my-project  🌿 main  🤖 Opus 4.6  📟 v2.1.70
+🧠 Ctx: 56% [=====-----]  ⚡ Session: 40% used, resets in 2h 31m [====------]  📊 Weekly: 6% used, resets in 6d 15h [----------]
 ```
+
+## Usage Limit Monitoring
+
+The statusline shows real-time usage limits from the Anthropic API:
+
+- **Session (5h)** — your current 5-hour usage window utilization
+- **Weekly (7d)** — your 7-day rolling usage utilization
+- Color-coded: mint (normal) → peach (≥70%) → red (≥90% or limit hit)
+
+This works by a PostToolUse hook (`ratelimit-probe.sh`) that makes a minimal background API call (1 Haiku token) every 2 minutes to fetch `anthropic-ratelimit-unified-*` response headers. Requires OAuth credentials (`~/.claude/.credentials.json`), which are set up automatically when you log in to Claude Code.
 
 ## Requirements
 
 - Python 3.6+
 - Linux (uses `/proc` filesystem)
-- `jq` (optional, for faster statusline JSON parsing)
+- `jq` (optional but recommended, for statusline JSON parsing)
+- `curl` (for usage limit probing)
