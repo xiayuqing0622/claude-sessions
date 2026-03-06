@@ -8,10 +8,14 @@ Only runs once per session (skips if label already exists).
 import json
 import os
 import sys
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 LABELS_FILE = Path.home() / ".claude" / "session-labels.json"
 HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
+CREDS_FILE = Path.home() / ".claude" / ".credentials.json"
+MAX_LABEL_LEN = 30
 
 
 def get_session_id():
@@ -76,6 +80,60 @@ def get_session_id():
     return None, None
 
 
+def get_oauth_token():
+    """Read OAuth token from credentials file."""
+    if not CREDS_FILE.exists():
+        return None
+    try:
+        creds = json.loads(CREDS_FILE.read_text())
+        return creds.get("claudeAiOauth", {}).get("accessToken")
+    except Exception:
+        return None
+
+
+def summarize_label(text, token):
+    """Call Haiku to summarize a long message into a short label."""
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 40,
+            "messages": [{"role": "user", "content":
+                f"Summarize this task into a very short label (max {MAX_LABEL_LEN} chars, same language as input). "
+                f"Output ONLY the label, nothing else.\n\n{text}"}],
+        }).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "oauth-2025-04-20",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            body = json.loads(resp.read())
+            label = body["content"][0]["text"].strip().strip('"')
+            return label[:MAX_LABEL_LEN] if len(label) > MAX_LABEL_LEN else label
+    except Exception:
+        return None
+
+
+def make_label(first_message):
+    """Make a short label: summarize via Haiku if long, otherwise truncate."""
+    text = first_message.split("\n")[0]
+    if len(text) <= MAX_LABEL_LEN:
+        return text
+
+    token = get_oauth_token()
+    if token:
+        summary = summarize_label(text, token)
+        if summary:
+            return summary
+
+    # Fallback: simple truncation
+    return text[:MAX_LABEL_LEN - 3] + "..."
+
+
 def main():
     session_id, first_message = get_session_id()
     if not session_id or not first_message:
@@ -93,12 +151,7 @@ def main():
     if session_id in labels:
         return
 
-    # Auto-label with first message (truncated)
-    text = first_message.split("\n")[0]
-    if len(text) > 60:
-        text = text[:57] + "..."
-
-    labels[session_id] = text
+    labels[session_id] = make_label(first_message)
     LABELS_FILE.write_text(json.dumps(labels, indent=2, ensure_ascii=False))
 
 
