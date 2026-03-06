@@ -12,6 +12,7 @@ from pathlib import Path
 
 LABELS_FILE = Path.home() / ".claude" / "session-labels.json"
 HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
+INSTALL_META = Path.home() / ".claude" / "cs-install.json"
 MY_UID = os.getuid()
 MY_USER = os.environ.get("USER", "")
 
@@ -23,6 +24,36 @@ RED = "\033[0;31m"
 DIM = "\033[2m"
 BOLD = "\033[1m"
 NC = "\033[0m"
+
+
+def _file_hash(path):
+    """Quick content hash for a file."""
+    import hashlib
+    try:
+        return hashlib.md5(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def check_upgrade():
+    """Warn if installed files are outdated vs source repo."""
+    if not INSTALL_META.exists():
+        return
+    try:
+        meta = json.loads(INSTALL_META.read_text())
+    except Exception:
+        return
+    source_dir = meta.get("source_dir", "")
+    if not source_dir or not Path(source_dir).is_dir():
+        return
+    stale = []
+    for name, dst in meta.get("files", {}).items():
+        src = Path(source_dir) / name
+        if src.exists() and Path(dst).exists():
+            if _file_hash(src) != _file_hash(dst):
+                stale.append(name)
+    if stale:
+        print(f"{YELLOW}cs: {', '.join(stale)} outdated. Run: cs install{NC}")
 
 
 def load_labels():
@@ -389,20 +420,44 @@ def _prompt_choice(prompt_text, options, default=0):
     return options[cur][1]
 
 
-def cmd_install(target_dir=None):
-    """One-click install: copy files, hooks, statusline, PATH — all set."""
+def _symlink_or_copy(src, dst):
+    """Create symlink src->dst. Falls back to copy if cross-device."""
     import shutil
+    if dst.is_symlink() or dst.exists():
+        if dst.is_symlink() and dst.resolve() == src.resolve():
+            print(f"{DIM}  {dst.name}: ✓ linked{NC}")
+            return
+        dst.unlink()
+    try:
+        dst.symlink_to(src)
+        print(f"{GREEN}  {dst.name}: → {src}{NC}")
+    except OSError:
+        shutil.copy2(src, dst)
+        dst.chmod(dst.stat().st_mode | 0o755)
+        print(f"{GREEN}  {dst.name}: copied{NC}")
 
+
+def cmd_install(target_dir=None):
+    """One-click install: symlink files, hooks, statusline, PATH — all set."""
     script_dir = Path(__file__).resolve().parent
     cs_src = script_dir / "cs"
     cs_hook_src = script_dir / "cs-hook"
     statusline_src = script_dir / "statusline.sh"
     ratelimit_probe_src = script_dir / "ratelimit-probe.sh"
-    # When running from installed copy (~/bin), assets are in ~/.claude
-    if not statusline_src.exists():
-        statusline_src = Path.home() / ".claude" / "statusline.sh"
-    if not ratelimit_probe_src.exists():
-        ratelimit_probe_src = Path.home() / ".claude" / "ratelimit-probe.sh"
+
+    # When running from installed copy (~/bin), try to find source repo from metadata
+    if not statusline_src.exists() and INSTALL_META.exists():
+        try:
+            meta = json.loads(INSTALL_META.read_text())
+            source_dir = Path(meta.get("source_dir", ""))
+            if source_dir.is_dir():
+                script_dir = source_dir
+                cs_src = script_dir / "cs"
+                cs_hook_src = script_dir / "cs-hook"
+                statusline_src = script_dir / "statusline.sh"
+                ratelimit_probe_src = script_dir / "ratelimit-probe.sh"
+        except Exception:
+            pass
     if not statusline_src.exists():
         print(f"{YELLOW}statusline.sh not found. Run install from the git repo directory.{NC}")
         sys.exit(1)
@@ -414,16 +469,12 @@ def cmd_install(target_dir=None):
         bin_dir = Path.home() / "bin"
 
     bin_dir.mkdir(parents=True, exist_ok=True)
+    print(f"{BOLD}Installing to {bin_dir}:{NC}")
+    installed_files = {}
     for name, src in [("cs", cs_src), ("cs-hook", cs_hook_src)]:
         dst = bin_dir / name
-        if src.resolve() == dst.resolve():
-            print(f"{DIM}{dst} already up to date{NC}")
-            continue
-        if dst.is_symlink():
-            dst.unlink()
-        shutil.copy2(src, dst)
-        dst.chmod(dst.stat().st_mode | 0o755)
-        print(f"{GREEN}Installed {dst}{NC}")
+        _symlink_or_copy(src, dst)
+        installed_files[name] = str(dst)
 
     # --- Choose .claude dir: ask only when project-level .claude exists ---
     user_claude = Path.home() / ".claude"
@@ -452,31 +503,26 @@ def cmd_install(target_dir=None):
         claude_dir = user_claude
 
     claude_dir.mkdir(parents=True, exist_ok=True)
+    print(f"{BOLD}Installing to {claude_dir}:{NC}")
 
-    # Copy statusline.sh into chosen .claude dir
+    # Symlink statusline.sh into chosen .claude dir
     sl_dst = claude_dir / "statusline.sh"
-    if statusline_src.resolve() == sl_dst.resolve():
-        print(f"{DIM}{sl_dst} already up to date{NC}")
-    else:
-        if sl_dst.is_symlink():
-            sl_dst.unlink()
-        shutil.copy2(statusline_src, sl_dst)
-        sl_dst.chmod(sl_dst.stat().st_mode | 0o755)
-        print(f"{GREEN}Installed {sl_dst}{NC}")
+    _symlink_or_copy(statusline_src, sl_dst)
+    installed_files["statusline.sh"] = str(sl_dst)
 
-    # Copy ratelimit-probe.sh into chosen .claude dir
+    # Symlink ratelimit-probe.sh into chosen .claude dir
     rl_dst = claude_dir / "ratelimit-probe.sh"
     if ratelimit_probe_src.exists():
-        if ratelimit_probe_src.resolve() == rl_dst.resolve():
-            print(f"{DIM}{rl_dst} already up to date{NC}")
-        else:
-            if rl_dst.is_symlink():
-                rl_dst.unlink()
-            shutil.copy2(ratelimit_probe_src, rl_dst)
-            rl_dst.chmod(rl_dst.stat().st_mode | 0o755)
-            print(f"{GREEN}Installed {rl_dst}{NC}")
+        _symlink_or_copy(ratelimit_probe_src, rl_dst)
+        installed_files["ratelimit-probe.sh"] = str(rl_dst)
     else:
-        print(f"{DIM}ratelimit-probe.sh not found, skipping usage limit probe{NC}")
+        print(f"{DIM}  ratelimit-probe.sh: not found, skipping{NC}")
+
+    # Save install metadata for upgrade checks
+    INSTALL_META.write_text(json.dumps({
+        "source_dir": str(script_dir),
+        "files": installed_files,
+    }, indent=2) + "\n")
 
     # Update settings.json in chosen .claude dir
     settings_file = claude_dir / "settings.json"
@@ -600,6 +646,8 @@ When no manual label is set, cs auto-detects the task from history.""")
 
 def main():
     args = sys.argv[1:]
+    if not args or args[0] not in ("install", "help", "-h", "--help", "h"):
+        check_upgrade()
     if not args:
         cmd_list()
     elif args[0] in ("-a", "--all"):
