@@ -354,6 +354,9 @@ def cmd_install(target_dir=None):
     bin_dir.mkdir(parents=True, exist_ok=True)
     for name, src in [("cs", cs_src), ("cs-hook", cs_hook_src)]:
         dst = bin_dir / name
+        if src.resolve() == dst.resolve():
+            print(f"{DIM}{dst} already up to date{NC}")
+            continue
         if dst.is_symlink():
             dst.unlink()
         shutil.copy2(src, dst)
@@ -390,11 +393,14 @@ def cmd_install(target_dir=None):
 
     # Copy statusline.sh into chosen .claude dir
     sl_dst = claude_dir / "statusline.sh"
-    if sl_dst.is_symlink():
-        sl_dst.unlink()
-    shutil.copy2(statusline_src, sl_dst)
-    sl_dst.chmod(sl_dst.stat().st_mode | 0o755)
-    print(f"{GREEN}Installed {sl_dst}{NC}")
+    if statusline_src.resolve() == sl_dst.resolve():
+        print(f"{DIM}{sl_dst} already up to date{NC}")
+    else:
+        if sl_dst.is_symlink():
+            sl_dst.unlink()
+        shutil.copy2(statusline_src, sl_dst)
+        sl_dst.chmod(sl_dst.stat().st_mode | 0o755)
+        print(f"{GREEN}Installed {sl_dst}{NC}")
 
     # Update settings.json in chosen .claude dir
     settings_file = claude_dir / "settings.json"
