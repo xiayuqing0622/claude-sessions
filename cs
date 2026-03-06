@@ -439,8 +439,9 @@ def cmd_install(target_dir=None):
     settings_file.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
     print(f"{GREEN}Updated {settings_file}{NC}")
 
-    # 4. Ensure ~/bin is in PATH — add to shell rc if needed
+    # 4. Ensure ~/bin is in PATH
     path_dirs = os.environ.get("PATH", "").split(":")
+    need_source = False
     if str(bin_dir) not in path_dirs:
         # Detect shell rc file
         shell = os.environ.get("SHELL", "/bin/bash")
@@ -450,7 +451,6 @@ def cmd_install(target_dir=None):
             rc_file = Path.home() / ".bashrc"
 
         path_line = 'export PATH="$HOME/bin:$PATH"'
-        # Check if already in rc file
         rc_has_it = False
         if rc_file.exists():
             rc_has_it = path_line in rc_file.read_text()
@@ -459,11 +459,14 @@ def cmd_install(target_dir=None):
             with open(rc_file, "a") as f:
                 f.write(f"\n# Added by cs (claude-sessions)\n{path_line}\n")
             print(f"{GREEN}Added ~/bin to PATH in {rc_file}{NC}")
-            print(f"{YELLOW}Run: source {rc_file}  (or open a new terminal){NC}")
-        else:
-            print(f"{DIM}~/bin already in {rc_file}{NC}")
 
-    print(f"\n{GREEN}Install complete! All set.{NC}")
+        need_source = True
+
+    if need_source:
+        print(f"\n{GREEN}Install complete!{NC}")
+        print(f"{YELLOW}>>> Run this to activate:  source {rc_file}{NC}")
+    else:
+        print(f"\n{GREEN}Install complete! All set.{NC}")
 
 
 def cmd_help():
