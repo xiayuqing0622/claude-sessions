@@ -47,10 +47,7 @@ def get_session_id():
     if not HISTORY_FILE.exists():
         return None, None
 
-    best_sid = None
-    best_diff = float("inf")
-    best_display = ""
-
+    sessions = {}
     with open(HISTORY_FILE, "r") as f:
         for line in f:
             try:
@@ -61,14 +58,21 @@ def get_session_id():
                 continue
             sid = msg.get("sessionId", "")
             ts = msg.get("timestamp", 0) / 1000
-            diff = abs(ts - stat_time)
-            if diff < best_diff:
-                best_diff = diff
-                best_sid = sid
-                best_display = msg.get("display", "")
+            if sid not in sessions:
+                sessions[sid] = {"first_ts": ts, "last_ts": ts, "display": msg.get("display", "")}
+            else:
+                sessions[sid]["last_ts"] = ts
 
-    if best_sid and best_diff < 300:
-        return best_sid, best_display
+    # Among sessions starting within 300s of process start, pick most recently active
+    candidates = []
+    for sid, info in sessions.items():
+        diff = abs(info["first_ts"] - stat_time)
+        if diff < 300:
+            candidates.append((-info["last_ts"], sid, info["display"]))
+    candidates.sort()
+
+    if candidates:
+        return candidates[0][1], candidates[0][2]
     return None, None
 
 
