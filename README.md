@@ -53,10 +53,10 @@ The statusline auto-adapts to terminal width so Claude Code doesn't clip it:
 
 | Width     | Layout                                                                 |
 |-----------|------------------------------------------------------------------------|
-| ≥ 140     | full — `Session: 24% used, resets in 1h 12m [==--------]`              |
-| 110–139   | tight — `Session: 24% · 1h12m [==--------]`                            |
-| 80–109    | compact — `Session: 24% · 1h12m` (no bars; drops `🎨 style`)            |
-| < 80      | minimal — short labels (`S:`/`W:`), Weekly on its own row              |
+| ≥ 150     | full — `Session: 24% used, resets in 1h 12m [==--------]`              |
+| 115–149   | tight — `Session: 24% · 1h12m [==--------]`                            |
+| 85–114    | compact — `Session: 24% · 1h12m` (no bars; drops `🎨 style`)            |
+| < 85      | minimal — short labels (`S:`/`W:`), Weekly on its own row              |
 
 Override detection with `CS_STATUSLINE_WIDTH=<cols>` if `$COLUMNS` isn't propagated by your terminal.
 
