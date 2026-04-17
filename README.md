@@ -103,7 +103,9 @@ Examples:
 /claude-sessions:setup
 ```
 
-That's it. The plugin auto-registers `cs-hook` and `ratelimit-probe.sh`. The `/claude-sessions:setup` slash command runs once to configure the statusline and symlink `cs` into `~/bin`.
+Then **exit and restart Claude Code** — hooks only load on startup, so `ratelimit-probe` won't fire (and the Session/Weekly usage bars won't appear) until you restart.
+
+The plugin auto-registers `cs-hook` and `ratelimit-probe.sh`. The `/claude-sessions:setup` slash command runs once to configure the statusline and symlink `cs` into `~/bin`.
 
 **Upgrading** — `/plugin update claude-sessions` pulls the latest. Re-run `/claude-sessions:setup` only if the statusline path changes.
 
