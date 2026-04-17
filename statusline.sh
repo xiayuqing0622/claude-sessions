@@ -15,13 +15,32 @@ fi
 # ---- terminal width detection ----
 # Claude Code clips each row of statusline output to the terminal width, so we adapt
 # line 2 verbosity to avoid the bottom row being hidden on narrow terminals.
-# Priority: CS_STATUSLINE_WIDTH override > COLUMNS env > 100 fallback (compact).
-# The fallback is intentionally conservative because Claude Code does not always
-# propagate COLUMNS to statusline subprocesses — compact fits most terminals.
+# Priority: CS_STATUSLINE_WIDTH override > COLUMNS env > ancestor-pts probe > 100 fallback.
 term_cols_src="override"
 term_cols="${CS_STATUSLINE_WIDTH:-}"
 if ! [[ "$term_cols" =~ ^[0-9]+$ ]] || [ "$term_cols" -le 0 ]; then
   term_cols="${COLUMNS:-}"; term_cols_src="COLUMNS"
+fi
+if ! [[ "$term_cols" =~ ^[0-9]+$ ]] || [ "$term_cols" -le 0 ]; then
+  # Claude Code does not propagate COLUMNS to subprocess, but its own process is
+  # still connected to the pts device. Walk up the process tree to find an ancestor
+  # with a /dev/pts/* fd, then read the terminal size via stty.
+  _pid=$$
+  for _i in 1 2 3 4 5; do
+    _ppid=$(awk '/PPid:/{print $2}' /proc/$_pid/status 2>/dev/null)
+    [[ "$_ppid" =~ ^[0-9]+$ ]] && [ "$_ppid" -gt 0 ] || break
+    for _fd in 0 1 2; do
+      _dev=$(readlink /proc/$_ppid/fd/$_fd 2>/dev/null)
+      if [[ "$_dev" == /dev/pts/* ]]; then
+        _c=$(stty size < "$_dev" 2>/dev/null | awk '{print $2}')
+        if [[ "$_c" =~ ^[0-9]+$ ]] && [ "$_c" -gt 0 ]; then
+          term_cols=$_c; term_cols_src="pts:$_dev"; break 2
+        fi
+      fi
+    done
+    _pid=$_ppid
+  done
+  unset _pid _ppid _i _fd _dev _c
 fi
 if ! [[ "$term_cols" =~ ^[0-9]+$ ]] || [ "$term_cols" -le 0 ]; then
   term_cols=100; term_cols_src="fallback"
