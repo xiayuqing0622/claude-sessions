@@ -1,6 +1,6 @@
 {
   "name": "claude-sessions",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Auto-label Claude Code sessions and surface usage limits in the statusline.",
   "author": {
     "name": "xiayuqing0622"

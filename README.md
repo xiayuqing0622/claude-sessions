@@ -49,16 +49,14 @@ A custom Claude Code statusline showing everything at a glance:
 
 **Line 2** — Context window remaining, session (5h) usage limit, weekly (7d) usage limit
 
-The statusline auto-adapts to terminal width so Claude Code doesn't clip it:
+The statusline auto-adapts to terminal width so Claude Code doesn't clip it. Two modes:
 
-| Width     | Layout                                                                 |
-|-----------|------------------------------------------------------------------------|
-| ≥ 150     | full — `Session: 24% used, resets in 1h 12m [==--------]`              |
-| 115–149   | tight — `Session: 24% · 1h12m [==--------]`                            |
-| 85–114    | compact — `Session: 24% · 1h12m` (no bars; drops `🎨 style`)            |
-| < 85      | minimal — short labels (`S:`/`W:`), Weekly on its own row              |
+| Width  | Layout                                                                                     |
+|--------|--------------------------------------------------------------------------------------------|
+| ≥ 140  | **full** — everything inline with progress bars (`Session: 24% used, resets in 1h 12m [==--------]`) |
+| < 140  | **compact** — short labels (`S:` / `W:`), no bars, Weekly on its own row; line 1 drops `📟 version`, `🎨 style`, and the ` (1M context)` suffix |
 
-Override detection with `CS_STATUSLINE_WIDTH=<cols>` if `$COLUMNS` isn't propagated by your terminal.
+Terminal width is detected in this order: `CS_STATUSLINE_WIDTH` override → `$COLUMNS` → reading the controlling pts device of an ancestor process → `100` fallback.
 
 ### 3. Usage Limit Monitoring
 

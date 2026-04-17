@@ -46,17 +46,16 @@ if ! [[ "$term_cols" =~ ^[0-9]+$ ]] || [ "$term_cols" -le 0 ]; then
   term_cols=100; term_cols_src="fallback"
 fi
 
-# Layout tiers — full/tight/compact/minimal, chosen by width.
-# Each emoji renders as ~2 cols but counts as 1 char, so thresholds include
-# some headroom for the 3–4 emojis per line.
-# full    : "Session: 24% used, resets in 1h 12m [==--------]"       (all 3 metrics)
-# tight   : "Session: 24% · 1h12m [==--------]"                       (shorter reset text)
-# compact : "Session: 24% · 1h12m"                                    (no bars)
-# minimal : "S: 24% 1h12m"                                            (short labels, split to 2 rows)
-if   [ "$term_cols" -ge 150 ]; then sl_layout="full"
-elif [ "$term_cols" -ge 115 ]; then sl_layout="tight"
-elif [ "$term_cols" -ge  85 ]; then sl_layout="compact"
-else                                sl_layout="minimal"
+# Layout: binary — full or compact. Previous 4-tier logic left narrow terminals
+# in edge cases where line 2 still got clipped. Compact is aggressive (drops
+# everything low-priority, splits Weekly to its own row) so it fits everywhere.
+# full    : "Session: 24% used, resets in 1h 12m [==--------]"  (all inline, bars)
+# compact : "S: 24% 1h12m" — short labels, no bars, Weekly on its own row,
+#           line 1 drops 🎨 style, 📟 version, and " (1M context)" suffix
+if [ "$term_cols" -ge 140 ]; then
+  sl_layout="full"
+else
+  sl_layout="compact"
 fi
 
 # Get the directory where this statusline script is located
@@ -267,15 +266,17 @@ if [ -f "$RATELIMIT_CACHE" ] && [ "$HAS_JQ" -eq 1 ]; then
       rl_remaining=$(( rl_s_reset_int - now_sec ))
       (( rl_remaining < 0 )) && rl_remaining=0
       rl_rh=$(( rl_remaining / 3600 )); rl_rm=$(( (rl_remaining % 3600) / 60 ))
-      case "$sl_layout" in
-        full)    rl_session_txt="${rl_session_pct}% used, resets in ${rl_rh}h ${rl_rm}m" ;;
-        tight)   rl_session_txt="${rl_session_pct}% · ${rl_rh}h${rl_rm}m" ;;
-        compact) rl_session_txt="${rl_session_pct}% · ${rl_rh}h${rl_rm}m" ;;
-        minimal) rl_session_txt="${rl_session_pct}% ${rl_rh}h${rl_rm}m" ;;
-      esac
+      if [ "$sl_layout" = "full" ]; then
+        rl_session_txt="${rl_session_pct}% used, resets in ${rl_rh}h ${rl_rm}m"
+      else
+        rl_session_txt="${rl_session_pct}% ${rl_rh}h${rl_rm}m"
+      fi
     else
-      rl_session_txt="${rl_session_pct}%"
-      [ "$sl_layout" = "full" ] && rl_session_txt="${rl_session_pct}% used"
+      if [ "$sl_layout" = "full" ]; then
+        rl_session_txt="${rl_session_pct}% used"
+      else
+        rl_session_txt="${rl_session_pct}%"
+      fi
     fi
     # Color based on utilization
     if [ "$rl_session_pct" -ge 90 ]; then
@@ -295,11 +296,11 @@ if [ -f "$RATELIMIT_CACHE" ] && [ "$HAS_JQ" -eq 1 ]; then
       rl_remaining=$(( rl_reset_int - now_sec ))
       (( rl_remaining < 0 )) && rl_remaining=0
       rl_rh=$(( rl_remaining / 3600 )); rl_rm=$(( (rl_remaining % 3600) / 60 ))
-      case "$sl_layout" in
-        full)             rl_session_txt="LIMIT HIT, resets in ${rl_rh}h ${rl_rm}m" ;;
-        tight|compact)    rl_session_txt="LIMIT · ${rl_rh}h${rl_rm}m" ;;
-        minimal)          rl_session_txt="LIMIT ${rl_rh}h${rl_rm}m" ;;
-      esac
+      if [ "$sl_layout" = "full" ]; then
+        rl_session_txt="LIMIT HIT, resets in ${rl_rh}h ${rl_rm}m"
+      else
+        rl_session_txt="LIMIT ${rl_rh}h${rl_rm}m"
+      fi
     else
       rl_session_txt="LIMIT HIT"
     fi
@@ -319,15 +320,17 @@ if [ -f "$RATELIMIT_CACHE" ] && [ "$HAS_JQ" -eq 1 ]; then
       rl_w_remaining=$(( rl_w_reset_int - now_sec ))
       (( rl_w_remaining < 0 )) && rl_w_remaining=0
       rl_wd=$(( rl_w_remaining / 86400 )); rl_wh=$(( (rl_w_remaining % 86400) / 3600 ))
-      case "$sl_layout" in
-        full)    rl_weekly_txt="${rl_weekly_pct}% used, resets in ${rl_wd}d ${rl_wh}h" ;;
-        tight)   rl_weekly_txt="${rl_weekly_pct}% · ${rl_wd}d${rl_wh}h" ;;
-        compact) rl_weekly_txt="${rl_weekly_pct}% · ${rl_wd}d${rl_wh}h" ;;
-        minimal) rl_weekly_txt="${rl_weekly_pct}% ${rl_wd}d${rl_wh}h" ;;
-      esac
+      if [ "$sl_layout" = "full" ]; then
+        rl_weekly_txt="${rl_weekly_pct}% used, resets in ${rl_wd}d ${rl_wh}h"
+      else
+        rl_weekly_txt="${rl_weekly_pct}% ${rl_wd}d${rl_wh}h"
+      fi
     else
-      rl_weekly_txt="${rl_weekly_pct}%"
-      [ "$sl_layout" = "full" ] && rl_weekly_txt="${rl_weekly_pct}% used"
+      if [ "$sl_layout" = "full" ]; then
+        rl_weekly_txt="${rl_weekly_pct}% used"
+      else
+        rl_weekly_txt="${rl_weekly_pct}%"
+      fi
     fi
     if [ "$rl_weekly_pct" -ge 80 ]; then
       rl_weekly_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;215m'; fi; }  # peach
@@ -365,33 +368,33 @@ printf '📁 %s%s%s' "$(dir_color)" "$current_dir" "$(rst)"
 if [ -n "$git_branch" ]; then
   printf '  🌿 %s%s%s' "$(git_color)" "$git_branch" "$(rst)"
 fi
-# Trim long model suffixes (e.g. " (1M context)") when terminal is narrow so line 1 fits
+# In compact, drop " (1M context)" suffix and the two lowest-priority segments
+# (cc_version, output_style) so line 1 never exceeds a narrow terminal.
 model_display="$model_name"
-if [ "$sl_layout" = "compact" ] || [ "$sl_layout" = "minimal" ]; then
-  model_display="${model_display% (1M context)}"
-fi
+[ "$sl_layout" = "compact" ] && model_display="${model_display% (1M context)}"
 printf '  🤖 %s%s%s' "$(model_color)" "$model_display" "$(rst)"
 if [ -n "$model_version" ] && [ "$model_version" != "null" ]; then
   printf '  🏷️ %s%s%s' "$(version_color)" "$model_version" "$(rst)"
 fi
-# cc_version and output_style are lower-priority — drop them progressively on narrow layouts.
-if [ -n "$cc_version" ] && [ "$cc_version" != "null" ] && [ "$sl_layout" != "minimal" ]; then
+if [ -n "$cc_version" ] && [ "$cc_version" != "null" ] && [ "$sl_layout" = "full" ]; then
   printf '  📟 %sv%s%s' "$(cc_version_color)" "$cc_version" "$(rst)"
 fi
-if [ -n "$output_style" ] && [ "$output_style" != "null" ] && [ "$sl_layout" != "minimal" ] && [ "$sl_layout" != "compact" ]; then
+if [ -n "$output_style" ] && [ "$output_style" != "null" ] && [ "$sl_layout" = "full" ]; then
   printf '  🎨 %s%s%s' "$(style_color)" "$output_style" "$(rst)"
 fi
 
-# Lines 2+: Context and usage limits, shape depends on layout.
-# - full/tight/compact: single row combining Ctx + Session + Weekly
-# - minimal:            Ctx + Session on one row, Weekly on its own row
-sl_show_bars=1
-sl_s_label="Session"
-sl_w_label="Weekly"
-case "$sl_layout" in
-  compact) sl_show_bars=0 ;;
-  minimal) sl_show_bars=0; sl_s_label="S"; sl_w_label="W" ;;
-esac
+# Lines 2+: Context and usage limits.
+# - full:    single row with Ctx + Session + Weekly and progress bars
+# - compact: short labels, no bars, Weekly on its own row
+if [ "$sl_layout" = "full" ]; then
+  sl_show_bars=1
+  sl_s_label="Session"
+  sl_w_label="Weekly"
+else
+  sl_show_bars=0
+  sl_s_label="S"
+  sl_w_label="W"
+fi
 
 # Build each segment independently so we can recombine across rows.
 ctx_seg=""
@@ -431,10 +434,10 @@ line2="$ctx_seg"
 [ -n "$usage_seg" ] && line2="${line2}  ${usage_seg}"
 
 line3=""
-if [ "$sl_layout" = "minimal" ]; then
-  line3="$weekly_seg"
-else
+if [ "$sl_layout" = "full" ]; then
   [ -n "$weekly_seg" ] && line2="${line2}  ${weekly_seg}"
+else
+  line3="$weekly_seg"
 fi
 
 # Print
