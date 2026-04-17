@@ -95,29 +95,29 @@ Examples:
 
 ### 5. Install & Upgrade
 
+**Recommended — Claude Code plugin** (zero-config hooks):
+
+```
+/plugin marketplace add xiayuqing0622/claude-sessions
+/plugin install claude-sessions@claude-sessions
+/claude-sessions:setup
+```
+
+That's it. The plugin auto-registers `cs-hook` and `ratelimit-probe.sh`. The `/claude-sessions:setup` slash command runs once to configure the statusline and symlink `cs` into `~/bin`.
+
+**Upgrading** — `/plugin update claude-sessions` pulls the latest. Re-run `/claude-sessions:setup` only if the statusline path changes.
+
+---
+
+**Alternative — clone + script** (no plugin):
+
 ```bash
 git clone https://github.com/xiayuqing0622/claude-sessions.git
 cd claude-sessions
 ./cs install
 ```
 
-The installer:
-- **Symlinks** `cs`, `cs-hook` to `~/bin` and `statusline.sh`, `ratelimit-probe.sh` to `~/.claude/`
-- Configures `~/.claude/settings.json` (statusLine + hooks)
-- Adds `~/bin` to `PATH` if needed
-- Falls back to file copy if symlinks aren't possible (cross-device, etc.)
-
-**Upgrading** — with symlinks, just pull:
-
-```bash
-cd claude-sessions && git pull
-```
-
-If installed via copy, `cs` warns on startup:
-
-```
-cs: statusline.sh, cs-hook outdated. Run: cs install
-```
+Does the same thing as the plugin path, but registers hooks directly in `~/.claude/settings.json`. Upgrading: `git pull` (symlinks stay live).
 
 Custom bin directory: `./cs install /usr/local/bin`
 

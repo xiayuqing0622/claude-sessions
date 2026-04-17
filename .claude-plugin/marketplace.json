@@ -1,0 +1,13 @@
+{
+  "name": "claude-sessions",
+  "owner": {
+    "name": "xiayuqing0622"
+  },
+  "plugins": [
+    {
+      "name": "claude-sessions",
+      "source": "./",
+      "description": "Auto-label Claude Code sessions and surface usage limits in the statusline."
+    }
+  ]
+}
