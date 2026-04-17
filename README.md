@@ -107,7 +107,32 @@ Then **exit and restart Claude Code** — hooks only load on startup, so `rateli
 
 The plugin auto-registers `cs-hook` and `ratelimit-probe.sh`. The `/claude-sessions:setup` slash command runs once to configure the statusline and symlink `cs` into `~/bin`.
 
-**Upgrading** — `/plugin update claude-sessions` pulls the latest. Re-run `/claude-sessions:setup` only if the statusline path changes.
+**Upgrading** — Claude Code caches plugin files by version, so pulling a new commit isn't enough:
+
+```
+/plugin                                          # open UI
+→ Marketplaces → claude-sessions → Update marketplace
+→ Installed    → claude-sessions → Update now
+```
+
+Then exit Claude Code (`exit` / Ctrl+D) and re-run `claude`. Verify in `/plugin` that the version bumped and the Errors tab has no entries for claude-sessions.
+
+## Troubleshooting
+
+**Statusline shows `Ctx` but not `Session` / `Weekly` usage bars.** The `ratelimit-probe.sh` PostToolUse hook hasn't populated `~/.claude/ratelimit-cache.json` yet. Common causes:
+
+- You've only tested with `!cmd` shortcuts — those execute directly in a shell and **don't trigger tool hooks**. Send a normal prompt that makes Claude use a tool (e.g. "read README").
+- Claude Code wasn't restarted after installing/updating the plugin. Plugin hooks only register at startup.
+- The first probe has a 2-minute TTL; if the cache was just seeded, subsequent tool uses won't re-probe until 2 min elapse.
+
+Quick diagnostic:
+
+```bash
+jq -r '.probeTime' ~/.claude/ratelimit-cache.json | xargs -I{} date -d @{} "+%F %T"
+date "+%F %T"
+```
+
+If `probeTime` lags the current time by more than a few minutes while you're actively using Claude Code with real tool calls, check `/plugin → Errors` for load errors.
 
 ---
 
