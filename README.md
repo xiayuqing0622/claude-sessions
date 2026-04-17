@@ -49,6 +49,17 @@ A custom Claude Code statusline showing everything at a glance:
 
 **Line 2** — Context window remaining, session (5h) usage limit, weekly (7d) usage limit
 
+The statusline auto-adapts to terminal width so Claude Code doesn't clip it:
+
+| Width     | Layout                                                                 |
+|-----------|------------------------------------------------------------------------|
+| ≥ 140     | full — `Session: 24% used, resets in 1h 12m [==--------]`              |
+| 110–139   | tight — `Session: 24% · 1h12m [==--------]`                            |
+| 80–109    | compact — `Session: 24% · 1h12m` (no bars; drops `🎨 style`)            |
+| < 80      | minimal — short labels (`S:`/`W:`), Weekly on its own row              |
+
+Override detection with `CS_STATUSLINE_WIDTH=<cols>` if `$COLUMNS` isn't propagated by your terminal.
+
 ### 3. Usage Limit Monitoring
 
 Real-time usage limits from the Anthropic API, displayed in the statusline:
