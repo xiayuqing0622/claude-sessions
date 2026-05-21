@@ -239,7 +239,8 @@ rl_status=""
 rl_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;158m'; fi; }  # default mint
 rl_weekly_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;153m'; fi; }  # default light blue
 
-RATELIMIT_CACHE="$HOME/.claude/ratelimit-cache.json"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+RATELIMIT_CACHE="$CLAUDE_DIR/ratelimit-cache.json"
 rl_error_msg=""
 rl_error_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;215m'; fi; }  # peach/warning
 if [ -f "$RATELIMIT_CACHE" ] && [ "$HAS_JQ" -eq 1 ]; then
@@ -350,7 +351,7 @@ fi
 # ---- session label from cs tool ----
 label_color() { if [ "$use_color" -eq 1 ]; then printf '\033[1;38;5;214m'; fi; }  # bold orange
 session_label=""
-CS_LABELS_FILE="${HOME}/.claude/session-labels.json"
+CS_LABELS_FILE="$CLAUDE_DIR/session-labels.json"
 if [ -f "$CS_LABELS_FILE" ] && [ -n "$session_id" ]; then
   if [ "$HAS_JQ" -eq 1 ]; then
     session_label=$(jq -r --arg sid "$session_id" '.[$sid] // empty' "$CS_LABELS_FILE" 2>/dev/null)

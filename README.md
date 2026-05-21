@@ -152,3 +152,7 @@ Custom bin directory: `./cs install /usr/local/bin`
 - Linux (uses `/proc` filesystem)
 - `jq` (optional but recommended, for statusline JSON parsing)
 - `curl` (for usage limit probing)
+
+## Custom Claude config dir
+
+All scripts honor Claude Code's `CLAUDE_CONFIG_DIR` env var. If you've moved your Claude config out of `~/.claude` (e.g. `export CLAUDE_CONFIG_DIR=/data/.claude`), `cs`, the statusline, and both hooks read/write inside that dir instead. Project-level `.claude` dirs keep their conventional name.

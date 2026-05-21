@@ -10,9 +10,16 @@ import sys
 import time
 from pathlib import Path
 
-LABELS_FILE = Path.home() / ".claude" / "session-labels.json"
-HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
-INSTALL_META = Path.home() / ".claude" / "cs-install.json"
+def _claude_dir():
+    """Resolve Claude Code's user config dir, honoring CLAUDE_CONFIG_DIR."""
+    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return Path(env).expanduser() if env else Path.home() / ".claude"
+
+
+CLAUDE_DIR = _claude_dir()
+LABELS_FILE = CLAUDE_DIR / "session-labels.json"
+HISTORY_FILE = CLAUDE_DIR / "history.jsonl"
+INSTALL_META = CLAUDE_DIR / "cs-install.json"
 MY_UID = os.getuid()
 MY_USER = os.environ.get("USER", "")
 
@@ -502,7 +509,8 @@ def cmd_install(target_dir=None):
         installed_files[name] = str(dst)
 
     # --- Choose .claude dir: ask only when project-level .claude exists ---
-    user_claude = Path.home() / ".claude"
+    # User-level dir honors CLAUDE_CONFIG_DIR; project-level dirs are always named `.claude`.
+    user_claude = CLAUDE_DIR
     claude_options = [
         (str(user_claude) + "  (all projects)", user_claude),
     ]

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # plugin-setup.sh — finish claude-sessions setup after `/plugin install`.
 # Plugin auto-registers hooks; this script handles the two things plugins can't:
-#   1. statusLine config in ~/.claude/settings.json
+#   1. statusLine config in $CLAUDE_CONFIG_DIR/settings.json (defaults to ~/.claude)
 #   2. symlinking `cs` into ~/bin so it's runnable from the terminal
 set -euo pipefail
 
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SETTINGS="$HOME/.claude/settings.json"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+SETTINGS="$CLAUDE_DIR/settings.json"
 BIN_DIR="${1:-$HOME/bin}"
 
 GREEN='\033[0;32m'
@@ -14,7 +15,7 @@ YELLOW='\033[1;33m'
 DIM='\033[2m'
 NC='\033[0m'
 
-mkdir -p "$BIN_DIR" "$HOME/.claude"
+mkdir -p "$BIN_DIR" "$CLAUDE_DIR"
 
 # 1. Symlink cs to ~/bin
 CS_DST="$BIN_DIR/cs"

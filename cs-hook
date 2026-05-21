@@ -12,9 +12,16 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-LABELS_FILE = Path.home() / ".claude" / "session-labels.json"
-HISTORY_FILE = Path.home() / ".claude" / "history.jsonl"
-CREDS_FILE = Path.home() / ".claude" / ".credentials.json"
+def _claude_dir():
+    """Resolve Claude Code's user config dir, honoring CLAUDE_CONFIG_DIR."""
+    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    return Path(env).expanduser() if env else Path.home() / ".claude"
+
+
+CLAUDE_DIR = _claude_dir()
+LABELS_FILE = CLAUDE_DIR / "session-labels.json"
+HISTORY_FILE = CLAUDE_DIR / "history.jsonl"
+CREDS_FILE = CLAUDE_DIR / ".credentials.json"
 MAX_LABEL_LEN = 30
 
 

@@ -6,8 +6,9 @@
 # Consume hook stdin immediately
 cat > /dev/null
 
-CACHE="$HOME/.claude/ratelimit-cache.json"
-CREDS="$HOME/.claude/.credentials.json"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CACHE="$CLAUDE_DIR/ratelimit-cache.json"
+CREDS="$CLAUDE_DIR/.credentials.json"
 LOCK="/tmp/.claude-ratelimit-probe.lock"
 TTL=120  # don't probe more often than every 2 minutes
 
