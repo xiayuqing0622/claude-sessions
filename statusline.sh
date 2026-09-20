@@ -174,6 +174,7 @@ if [ "$HAS_JQ" -eq 1 ]; then
   model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"' 2>/dev/null)
   model_version=$(echo "$input" | jq -r '.model.version // ""' 2>/dev/null)
   session_id=$(echo "$input" | jq -r '.session_id // ""' 2>/dev/null)
+  transcript_path=$(echo "$input" | jq -r '.transcript_path // ""' 2>/dev/null)
   cc_version=$(echo "$input" | jq -r '.version // ""' 2>/dev/null)
   output_style=$(echo "$input" | jq -r '.output_style.name // ""' 2>/dev/null)
 else
@@ -196,6 +197,7 @@ else
   # Model version is in the model ID, not a separate field  
   model_version=""  # Not available in Claude Code JSON
   session_id=$(extract_json_string "$input" "session_id" "")
+  transcript_path=$(extract_json_string "$input" "transcript_path" "")
   # CC version is at the root level
   cc_version=$(echo "$input" | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
   # Output style is nested
@@ -261,6 +263,52 @@ rl_weekly_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;153m'; fi;
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
+# ---- which account is logged in, and since when ----
+# Every usage number below belongs to one account, and an account switcher (claude-swap
+# and friends) can replace it under a running session. Claude Code records the live one
+# in the oauthAccount section of its global config, which the switcher rewrites in the
+# same breath as the credential — so that uuid is the cheapest honest answer to "whose
+# limits am I looking at". Path resolution mirrors Claude Code's: a legacy .config.json
+# inside the config dir wins, else .claude.json, which stays at $HOME even when
+# CLAUDE_CONFIG_DIR moves everything else.
+if [ -f "$CLAUDE_DIR/.config.json" ]; then
+  CS_CONFIG_JSON="$CLAUDE_DIR/.config.json"
+elif [ -n "$CLAUDE_CONFIG_DIR" ]; then
+  CS_CONFIG_JSON="$CLAUDE_CONFIG_DIR/.claude.json"
+else
+  CS_CONFIG_JSON="$HOME/.claude.json"
+fi
+acct_id=""
+if [ -f "$CS_CONFIG_JSON" ]; then
+  if [ "$HAS_JQ" -eq 1 ]; then
+    acct_id=$(jq -r '.oauthAccount.accountUuid // empty' "$CS_CONFIG_JSON" 2>/dev/null)
+  else
+    acct_id=$(grep -o '"accountUuid"[[:space:]]*:[[:space:]]*"[^"]*"' "$CS_CONFIG_JSON" 2>/dev/null \
+      | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+  fi
+fi
+
+# The switch itself has no event to hook, so the first session to render after it is the
+# one that timestamps it, in a file every session reads. The very first run has nothing
+# to compare against and records the account without claiming a switch happened.
+ACCOUNT_STATE="$CLAUDE_DIR/account-state"
+acct_changed_at=0
+if [ -n "$acct_id" ]; then
+  acct_prev_id=""; acct_prev_at=0
+  if [ -f "$ACCOUNT_STATE" ]; then
+    IFS=$'\t' read -r acct_prev_id acct_prev_at < "$ACCOUNT_STATE"
+    [[ "$acct_prev_at" =~ ^[0-9]+$ ]] || acct_prev_at=0
+  fi
+  if [ "$acct_prev_id" = "$acct_id" ]; then
+    acct_changed_at="$acct_prev_at"
+  else
+    [ -n "$acct_prev_id" ] && acct_changed_at=$(date +%s)
+    printf '%s\t%s\n' "$acct_id" "$acct_changed_at" > "$ACCOUNT_STATE.$$" 2>/dev/null \
+      && mv -f "$ACCOUNT_STATE.$$" "$ACCOUNT_STATE" 2>/dev/null
+    rm -f "$ACCOUNT_STATE.$$" 2>/dev/null
+  fi
+fi
+
 if [ "$HAS_JQ" -eq 1 ]; then
   u5h=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty' 2>/dev/null)
   r5h=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty' 2>/dev/null)
@@ -280,6 +328,32 @@ fi
 # They are a per-session snapshot: Claude Code only updates them after *this* session's
 # API responses, so a window you left idle keeps reporting whatever it was told last.
 nat_u5h="$u5h"; nat_r5h="$r5h"; nat_u7d="$u7d"; nat_r7d="$r7d"
+
+# ...and drop them wholesale if they predate an account switch. Claude Code refreshes
+# rate_limits from the response headers of *this* session's API calls, so right after a
+# switch every open session is still quoting the account you left — a number that is not
+# merely stale but about somebody else's quota, and one that no amount of waiting fixes
+# in a session you do not type in again. The session's own transcript dates it: untouched
+# since the switch means it has not had a response since either. Sessions without a
+# readable transcript fall back to a fixed grace window.
+ACCOUNT_GRACE="${CS_ACCOUNT_GRACE:-900}"
+[[ "$ACCOUNT_GRACE" =~ ^[0-9]+$ ]] || ACCOUNT_GRACE=900
+nat_stale=0
+if [ "$acct_changed_at" -gt 0 ]; then
+  sess_mtime=0
+  if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    sess_mtime=$(stat -c %Y "$transcript_path" 2>/dev/null || stat -f %m "$transcript_path" 2>/dev/null || echo 0)
+  fi
+  if [ "$sess_mtime" -gt 0 ]; then
+    [ "$sess_mtime" -lt "$acct_changed_at" ] && nat_stale=1
+  elif [ $(( $(date +%s) - acct_changed_at )) -lt "$ACCOUNT_GRACE" ]; then
+    nat_stale=1
+  fi
+fi
+if [ "$nat_stale" -eq 1 ]; then
+  u5h=""; r5h=""; u7d=""; r7d=""
+  nat_u5h=""; nat_r5h=""; nat_u7d=""; nat_r7d=""
+fi
 
 # Compare a native window against the cached one. Usage only grows inside a window, so a
 # higher percentage for the same resets_at is simply the newer reading — which is how one
@@ -311,6 +385,7 @@ MODEL_USAGE_MIN_INTERVAL="${CS_USAGE_MIN_INTERVAL:-180}"    # floor between refr
 MODEL_USAGE_ERROR_BACKOFF="${CS_USAGE_ERROR_BACKOFF:-900}"  # slower retry after a failure
 mu_names=(); mu_pcts=(); mu_resets=()
 mu_note=""; mu_status=""; mu_age=-1; mu_need=0; mu_fresh=0
+mu_account=""; mu_acct_mismatch=0; mu_unstamped=0
 mu_s_pct=""; mu_s_reset=""; mu_w_pct=""; mu_w_reset=""
 
 if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ -f "$MODEL_USAGE_CACHE" ]; then
@@ -320,7 +395,8 @@ if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ -f "$MODEL_USAGE_CACHE" ]; then
   # One TSV record per line: "#" the cache's own state, "s"/"w" the session and
   # all-model weekly windows, "m" a per-model bucket.
   if [ "$HAS_JQ" -eq 1 ]; then
-    mu_rows=$(jq -r '["#", (.status // ""), (.errorMsg // "")],
+    mu_rows=$(jq -r '["a", (.account // ""), ""],
+                     ["#", (.status // ""), (.errorMsg // "")],
                      ["s", (.session.percent // ""), (.session.resetsAt // "")],
                      ["w", (.weeklyAll.percent // ""), (.weeklyAll.resetsAt // "")],
                      ((.models // [])[] | ["m", .name, (.percent // 0), (.resetsAt // 0)])
@@ -332,6 +408,7 @@ try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
+print("a\t%s\t" % (d.get("account") or ""))
 print("#\t%s\t%s" % (d.get("status") or "", d.get("errorMsg") or ""))
 for key, tag in (("session", "s"), ("weeklyAll", "w")):
     win = d.get(key) or {}
@@ -342,6 +419,18 @@ for m in d.get("models") or []:
   fi
   while IFS=$'\t' read -r mu_k mu_a mu_b mu_c; do
     case "$mu_k" in
+      a)
+        # Numbers read for the account you just left are not stale, they are wrong:
+        # no age makes them true again, so the whole cache goes, freshness included.
+        mu_account="$mu_a"
+        if [ -n "$acct_id" ]; then
+          if [ -z "$mu_account" ]; then
+            mu_unstamped=1        # written before this cache carried an account
+          elif [ "$mu_account" != "$acct_id" ]; then
+            mu_acct_mismatch=1; mu_fresh=0
+          fi
+        fi
+        ;;
       '#')
         mu_status="$mu_a"
         [ "$mu_status" = "ok" ] || mu_note="${mu_b:-$mu_status}"
@@ -357,7 +446,11 @@ for m in d.get("models") or []:
         ;;
     esac
   done <<< "$mu_rows"
-  [ "$mu_fresh" -eq 1 ] || mu_note="cache stale (${mu_age}s old)"
+  if [ "$mu_acct_mismatch" -eq 1 ]; then
+    mu_note="cache belongs to another account"
+  elif [ "$mu_fresh" -ne 1 ]; then
+    mu_note="cache stale (${mu_age}s old)"
+  fi
 fi
 
 # Two cases where the shared cache beats what this session was told:
@@ -463,8 +556,15 @@ if [ "${CS_MODEL_USAGE:-1}" != "0" ]; then
   if [ "$mu_fresh" -eq 1 ] && [ -z "$mu_s_pct" ] && [ -n "$nat_u5h" ] && [ "$nat_u5h" != "null" ]; then
     mu_behind=1
   fi
+  # A cache from before this file carried an account: usable, but worth re-stamping so
+  # the next switch is caught. Left on the ordinary floor — nothing is wrong with it.
+  [ "$mu_unstamped" -eq 1 ] && mu_behind=1
 
   if [ ! -f "$MODEL_USAGE_CACHE" ]; then
+    mu_need=1
+  elif [ "$mu_acct_mismatch" -eq 1 ]; then
+    # The one case worth spending a request on immediately: every segment is either
+    # blank or about the previous account until this lands.
     mu_need=1
   elif [ "$mu_status" != "ok" ]; then
     [ "$mu_age" -ge "$MODEL_USAGE_ERROR_BACKOFF" ] && mu_need=1
@@ -499,6 +599,7 @@ if [ -n "$LOG_FILE" ]; then
 {
   echo "[$TIMESTAMP] Extracted: dir=${current_dir:-}, model=${model_name:-}, git=${git_branch:-}, ctx=${context_pct:-}, session=${rl_session_pct:-}%, weekly=${rl_weekly_pct:-}%"
   echo "[$TIMESTAMP] Usage cache: ${#mu_names[@]} model bucket(s)${mu_names[0]:+ (${mu_names[0]} ${mu_pcts[0]}%)} status=${mu_status:-none} age=${mu_age}s vs-native=s:${mu_s_state}/w:${mu_w_state} filled=s${rl_s_cached}/w${rl_w_cached} refresh=${mu_need}${mu_note:+ note=${mu_note}}"
+  echo "[$TIMESTAMP] Account: ${acct_id:-none} changed_at=${acct_changed_at} cache_account=${mu_account:-none} mismatch=${mu_acct_mismatch} native_dropped=${nat_stale}"
   echo "[$TIMESTAMP] Width: term_cols=${term_cols} (source=${term_cols_src}) max_rows=${sl_max_rows}"
 } >> "$LOG_FILE" 2>/dev/null
 fi

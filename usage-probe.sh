@@ -18,6 +18,7 @@
 # Env:
 #   CS_MODEL_USAGE=0          disable entirely (statusline then shows one Weekly segment)
 #   CS_USAGE_MIN_INTERVAL=180 floor between probes; CS_USAGE_FORCE=1 bypasses it
+#                             (a cache written for a different account bypasses it too)
 #   ANTHROPIC_BASE_URL        override the API host
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -29,22 +30,54 @@ MIN_INTERVAL="${CS_USAGE_MIN_INTERVAL:-180}"
 
 [ "${CS_MODEL_USAGE:-1}" = "0" ] && exit 0
 
-# Rate floor, independent of whoever called us. `CS_USAGE_FORCE=1 ./usage-probe.sh`
-# skips it — that is the troubleshooting path.
-if [ "${CS_USAGE_FORCE:-0}" != "1" ] && [ -f "$CACHE" ]; then
-  cache_mtime=$(stat -c %Y "$CACHE" 2>/dev/null || stat -f %m "$CACHE" 2>/dev/null || echo 0)
-  now=$(date +%s)
-  [ $(( now - cache_mtime )) -lt "$MIN_INTERVAL" ] && exit 0
-fi
-
 command -v python3 >/dev/null 2>&1 || exit 0
 
+# ---- whose numbers these are ----
+# Account switchers (claude-swap and friends) replace both the stored credential and
+# the oauthAccount section of the global config. Stamping the cache with the account
+# it was read for is what lets the statusline tell "180s old" from "belongs to the
+# account you just left". Config path follows Claude Code's own resolution: a legacy
+# .config.json inside the config dir wins, otherwise .claude.json, which sits at $HOME
+# unless CLAUDE_CONFIG_DIR moves it — note the asymmetry with .credentials.json.
+if [ -f "$CLAUDE_DIR/.config.json" ]; then
+  CONFIG_JSON="$CLAUDE_DIR/.config.json"
+elif [ -n "$CLAUDE_CONFIG_DIR" ]; then
+  CONFIG_JSON="$CLAUDE_CONFIG_DIR/.claude.json"
+else
+  CONFIG_JSON="$HOME/.claude.json"
+fi
+ACCOUNT=$(python3 -c '
+import json, sys
+try:
+    print((json.load(open(sys.argv[1])).get("oauthAccount") or {}).get("accountUuid") or "")
+except Exception:
+    pass
+' "$CONFIG_JSON" 2>/dev/null)
+
+# Rate floor, independent of whoever called us. `CS_USAGE_FORCE=1 ./usage-probe.sh`
+# skips it — that is the troubleshooting path. A cache belonging to another account is
+# not rate-limited away either: after a switch the first caller probes immediately.
+if [ "${CS_USAGE_FORCE:-0}" != "1" ] && [ -f "$CACHE" ]; then
+  cached_account=$(python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("account") or "")
+except Exception:
+    pass
+' "$CACHE" 2>/dev/null)
+  if [ "$cached_account" = "$ACCOUNT" ]; then
+    cache_mtime=$(stat -c %Y "$CACHE" 2>/dev/null || stat -f %m "$CACHE" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    [ $(( now - cache_mtime )) -lt "$MIN_INTERVAL" ] && exit 0
+  fi
+fi
+
 write_error() {
-  python3 - "$CACHE" "$1" "$2" <<'PY' 2>/dev/null
+  python3 - "$CACHE" "$1" "$2" "$ACCOUNT" <<'PY' 2>/dev/null
 import json, sys, time
-path, code, msg = sys.argv[1], sys.argv[2], sys.argv[3]
-json.dump({"probeTime": int(time.time()), "status": "error", "error": code,
-           "errorMsg": msg}, open(path, "w"), indent=2)
+path, code, msg, account = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+json.dump({"probeTime": int(time.time()), "account": account, "status": "error",
+           "error": code, "errorMsg": msg}, open(path, "w"), indent=2)
 PY
 }
 
@@ -85,6 +118,7 @@ fi
 # The token goes through the environment, never argv (argv is world-readable in ps).
 CS_OAUTH_TOKEN="$TOKEN" \
 CS_USAGE_BASE="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}" \
+CS_ACCOUNT="$ACCOUNT" \
 python3 - "$CACHE" <<'PY' 2>/dev/null
 import calendar, json, os, re, sys, time, urllib.error, urllib.request
 
@@ -94,6 +128,7 @@ url = os.environ["CS_USAGE_BASE"].rstrip("/") + "/api/oauth/usage"
 
 def write(obj):
     obj["probeTime"] = int(time.time())
+    obj["account"] = os.environ.get("CS_ACCOUNT", "")
     tmp = cache + ".tmp"
     with open(tmp, "w") as f:
         json.dump(obj, f, indent=2)
