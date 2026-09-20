@@ -130,6 +130,30 @@ the gap before Claude Code reports them.
 - Whatever buckets the endpoint returns are shown by name, so this works unchanged for
   an `Opus` bucket or any future model-scoped window.
 
+**Switching accounts.** Every number here belongs to one account, and a switcher such as
+[claude-swap](https://github.com/realiti4/claude-swap) can replace it under running
+sessions. Both sides of the display know that:
+
+- The cache carries an `account` field — the `oauthAccount.accountUuid` Claude Code
+  records in its global config, which switchers rewrite along with the credential. A
+  cache stamped with the account you just left is not *stale*, it is about somebody
+  else's quota, so it is discarded outright rather than served until `CS_USAGE_MAX_AGE`,
+  and it refreshes immediately instead of waiting out `CS_USAGE_MIN_INTERVAL`.
+- The native `rate_limits` are dropped the same way. Claude Code refreshes them from the
+  response headers of *that session's* API calls, so right after a switch every open
+  window is still quoting the old account — and a window you never type in again would
+  quote it forever. The session's own transcript dates it: untouched since the switch
+  means no response since the switch either, so the numbers go and the cache takes over.
+
+The practical effect: one render (≤ `refreshInterval`, 60s) after the switch, every
+window shows the new account. In between there is a brief gap where a segment is blank
+rather than wrong. To collapse even that, have your switcher run the probe on the way
+out:
+
+```bash
+CS_USAGE_FORCE=1 ~/.claude/usage-probe.sh
+```
+
 Tunables (env vars):
 
 | Var | Default | Effect |
@@ -139,6 +163,7 @@ Tunables (env vars):
 | `CS_USAGE_ERROR_BACKOFF` | `900` | Slower retry after a failed probe |
 | `CS_USAGE_MAX_AGE` | `1800` | Ignore (and refresh) the cache once it is older than this |
 | `CS_USAGE_FORCE=1` | off | Bypass the floor (for a manual probe run) |
+| `CS_ACCOUNT_GRACE` | `900` | After an account switch, how long to distrust a session's native numbers when it has no readable transcript to date them by |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API host for the usage read |
 | `CS_STATUSLINE_MAX_ROWS` | `1` | Row budget per segment group (see above) |
 | `CS_STATUSLINE_LOG=1` | off | Write `statusline.log` (the whole stdin payload per render) |
@@ -220,6 +245,13 @@ Examples:
   ever revises a percentage *down* within the same `resets_at` — a correction, a refund,
   rolling-window semantics — the higher cached value keeps winning until that window
   resets. Deliberate trade: it is what lets sessions order two readings with no clock.
+- **Account switching is detected on render, not on the switch.** There is no event to
+  hook, so the first statusline render after the switch is what timestamps it in
+  `$CLAUDE_CONFIG_DIR/account-state`. A switch made while every session is closed is
+  noticed by the first session to render afterwards, which is early enough.
+- **A window-rollover in the first `CS_ACCOUNT_GRACE` after a switch can show a cached
+  number for up to `CS_USAGE_MIN_INTERVAL`.** It only affects sessions whose transcript
+  is unreadable, where the switch has to be bounded by a timer instead.
 - **An API-key session borrows subscription numbers.** API-key auth gets no `rate_limits`
   on stdin, so the `~` fill shows the cached *subscription* windows, which do not govern
   that session at all. The statusline input carries no auth-type field to tell them apart.
@@ -265,6 +297,16 @@ echo '' | your-statusline-cmd    # or inspect: the input JSON has a top-level "r
 ```
 
 **`Ctx` shows `…`.** `context_window` is `null` before the first API response of a session; it fills in as soon as Claude makes a call.
+
+**Usage still shows the account I switched away from.** Check what the statusline thinks is logged in:
+
+```bash
+jq -r '.oauthAccount.accountUuid' ~/.claude.json                       # the live account
+jq -r '.account' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/model-usage-cache.json"   # the cached one
+cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/account-state"                # account + when it changed
+```
+
+If the first two disagree and stay disagreeing, the probe cannot refresh — run it by hand (`CS_USAGE_FORCE=1 ~/.claude/usage-probe.sh`) and read its `errorMsg`. If they agree but a window still shows the old numbers, that session has not made an API call since the switch and its transcript looks newer than the switch; send it a prompt. `CS_STATUSLINE_LOG=1` logs an `Account:` line per render with all of it.
 
 **Weekly shows only one number (no `🎭 Fable` segment).** The per-model bucket comes from `usage-probe.sh`, not from Claude Code. Check, in order:
 
