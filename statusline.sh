@@ -301,6 +301,108 @@ win_state() { # native_pct native_reset cached_pct cached_reset -> ahead|behind|
   }'
 }
 
+# ---- auth source: who this session bills to ----
+# Several ways to run Claude Code side by side (a claude.ai login, a per-session
+# --settings file carrying a token or a third-party endpoint, a CLAUDE_CONFIG_DIR
+# profile) look identical from inside a session. Claude Code strips its own OAuth
+# token and subscription variables from the statusline's environment and puts no auth
+# field on stdin, so the source is worked out from what is left, first match wins:
+#   1. --settings <file> on the command line whose env block sets an auth or endpoint
+#      variable (or which sets apiKeyHelper)   -> the file's name without .json
+#   2. CLAUDE_CODE_USE_BEDROCK / _VERTEX / _FOUNDRY -> the provider
+#   3. ANTHROPIC_BASE_URL that is not api.anthropic.com -> its host
+#   4. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN -> "API key"
+#   5. otherwise the claude.ai login recorded in the config dir -> its email
+# CS_AUTH_LABEL replaces the shown text without changing which source was detected.
+# Only variable names are ever inspected in a settings file, never their values.
+# auth_login=1 means the session runs on the login stored in the config dir — the only
+# case where the shared usage cache (fetched with that login) describes this session.
+auth_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;211m'; fi; }  # soft pink
+auth_t1=""; auth_t3=""; auth_login=1
+
+if [[ "${CLAUDE_PID:-}" =~ ^[0-9]+$ ]]; then
+  # The settings file named on the command line. /proc keeps argv intact; ps is the
+  # fallback elsewhere and splits on spaces, so a path containing one is missed there.
+  auth_args=()
+  if [ -r "/proc/$CLAUDE_PID/cmdline" ]; then
+    while IFS= read -r -d '' _a; do auth_args+=("$_a"); done < "/proc/$CLAUDE_PID/cmdline"
+  else
+    read -r -a auth_args <<< "$(ps -o args= -p "$CLAUDE_PID" 2>/dev/null)"
+  fi
+  auth_settings=""
+  for (( _i=0; _i<${#auth_args[@]}; _i++ )); do
+    case "${auth_args[$_i]}" in
+      --settings) auth_settings="${auth_args[$((_i+1))]:-}" ;;
+      --settings=*) auth_settings="${auth_args[$_i]#--settings=}" ;;
+    esac
+  done
+  unset _i _a
+  # Inline JSON (--settings '{...}') has no name to show; only a file does.
+  if [ -n "$auth_settings" ] && [ -f "$auth_settings" ]; then
+    auth_keys=""
+    if [ "$HAS_JQ" -eq 1 ]; then
+      auth_keys=$(jq -r '((.env // {}) | keys[]), (if .apiKeyHelper then "apiKeyHelper" else empty end)' "$auth_settings" 2>/dev/null)
+    else
+      auth_keys=$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+print("\n".join((d.get("env") or {}).keys()))
+if d.get("apiKeyHelper"):
+    print("apiKeyHelper")
+' "$auth_settings" 2>/dev/null)
+    fi
+    if printf '%s\n' "$auth_keys" | grep -qxE 'CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_BASE_URL|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY)|apiKeyHelper'; then
+      auth_t1=$(basename "$auth_settings" .json); auth_login=0
+    elif printf '%s\n' "$auth_keys" | grep -qx 'CLAUDE_CONFIG_DIR'; then
+      # A different config dir holds a different login: name the file, but the
+      # login (and the usage cache under CLAUDE_DIR) is still that dir's own.
+      auth_t1=$(basename "$auth_settings" .json)
+    fi
+  fi
+fi
+
+if [ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]; then [ -n "$auth_t1" ] || auth_t1="Bedrock"; auth_login=0
+elif [ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]; then [ -n "$auth_t1" ] || auth_t1="Vertex"; auth_login=0
+elif [ -n "${CLAUDE_CODE_USE_FOUNDRY:-}" ]; then [ -n "$auth_t1" ] || auth_t1="Foundry"; auth_login=0
+fi
+
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+  auth_host="${ANTHROPIC_BASE_URL#*://}"; auth_host="${auth_host%%/*}"; auth_host="${auth_host%%:*}"
+  if [ -n "$auth_host" ] && [ "$auth_host" != "api.anthropic.com" ]; then
+    auth_login=0
+    if [ -z "$auth_t1" ]; then
+      auth_t1="$auth_host"
+      # Terse form keeps the last two labels: ark.cn-beijing.example.com -> example.com
+      auth_t3=$(printf '%s' "$auth_host" | awk -F. 'NF>2 && $NF !~ /^[0-9]+$/ {print $(NF-1)"."$NF; next} {print}')
+    fi
+  fi
+fi
+
+if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+  [ -n "$auth_t1" ] || auth_t1="API key"; auth_login=0
+fi
+
+if [ -z "$auth_t1" ]; then
+  # The global config lives beside the config dir by default, inside it when
+  # CLAUDE_CONFIG_DIR is set.
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then auth_cfg="$CLAUDE_CONFIG_DIR/.claude.json"; else auth_cfg="$HOME/.claude.json"; fi
+  if [ -f "$auth_cfg" ]; then
+    if [ "$HAS_JQ" -eq 1 ]; then
+      auth_t1=$(jq -r '.oauthAccount.emailAddress // empty' "$auth_cfg" 2>/dev/null)
+    else
+      auth_t1=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("oauthAccount") or {}).get("emailAddress") or "")' "$auth_cfg" 2>/dev/null)
+    fi
+    auth_t3="${auth_t1%%@*}"
+  fi
+fi
+
+if [ -n "${CS_AUTH_LABEL:-}" ]; then auth_t1="$CS_AUTH_LABEL"; auth_t3=""; fi
+[ -n "$auth_t3" ] || auth_t3="$auth_t1"
+if [ "${CS_AUTH_SEGMENT:-1}" = "0" ]; then auth_t1=""; auth_t3=""; fi
+
 # ---- usage-probe cache ----
 # Holds the per-model weekly bucket (Fable, Opus, ...), which is not on the statusline
 # stdin at all, plus copies of the session and all-model weekly windows. usage-probe.sh
@@ -313,7 +415,7 @@ mu_names=(); mu_pcts=(); mu_resets=()
 mu_note=""; mu_status=""; mu_age=-1; mu_need=0; mu_fresh=0
 mu_s_pct=""; mu_s_reset=""; mu_w_pct=""; mu_w_reset=""
 
-if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ -f "$MODEL_USAGE_CACHE" ]; then
+if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ "$auth_login" -eq 1 ] && [ -f "$MODEL_USAGE_CACHE" ]; then
   mu_mtime=$(stat -c %Y "$MODEL_USAGE_CACHE" 2>/dev/null || stat -f %m "$MODEL_USAGE_CACHE" 2>/dev/null || echo 0)
   mu_age=$(( $(date +%s) - mu_mtime ))
   [ "$mu_age" -lt "$MODEL_USAGE_MAX_AGE" ] && mu_fresh=1
@@ -456,7 +558,9 @@ fi
 # too. A session left idle compares equal and asks for nothing, however often it renders
 # — the work of refreshing falls on whichever session is actually consuming usage. The
 # staleness rule is the backstop for when every session is idle.
-if [ "${CS_MODEL_USAGE:-1}" != "0" ]; then
+# Only a session on the stored login may ask: the probe reads that login's token, and
+# its numbers describe that account, not whatever this session bills to.
+if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ "$auth_login" -eq 1 ]; then
   mu_behind=0
   { [ "$mu_s_state" = "behind" ] || [ "$mu_w_state" = "behind" ]; } && mu_behind=1
   # Native windows with nothing cached to compare them to: the cache needs those numbers.
@@ -540,6 +644,7 @@ add_seg 1 "📁" dir_color "$current_dir" "$current_dir" "$current_dir"
 # The " (1M context)" suffix is worth abbreviating, not dropping.
 model_terse="${model_name/ (1M context)/ (1M)}"
 add_seg 1 "🤖" model_color "$model_name" "$model_name" "$model_terse"
+[ -n "$auth_t1" ] && add_seg 1 "🔑" auth_color "$auth_t1" "$auth_t1" "$auth_t3"
 if [ -n "$model_version" ] && [ "$model_version" != "null" ]; then
   add_seg 1 "🏷️" version_color "$model_version" "$model_version" "$model_version"
 fi

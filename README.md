@@ -41,11 +41,11 @@ cs clean                            # remove labels for dead sessions
 A custom Claude Code statusline showing everything at a glance:
 
 ```
-🏷️ fix auth module  📁 workspace/my-project  🌿 feat/auth  🤖 Opus 5  📟 v2.1.274  🎨 concise
+🏷️ fix auth module  📁 workspace/my-project  🌿 feat/auth  🤖 Opus 5  🔑 you@example.com  📟 v2.1.274  🎨 concise
 🧠 Ctx: 56% [=====-----]  ⚡ Session: 40% used, resets in 2h 31m [====------]  📊 Weekly(all): 57% used, resets in 1d 13h [=====-----]  🎭 Fable: 5% used [----------]
 ```
 
-**Identity group** — Session label, working directory, git branch, model, Claude Code version, output style
+**Identity group** — Session label, working directory, git branch, model, [auth source](#auth-source), Claude Code version, output style
 
 **Usage group** — Context window remaining, session (5h) usage limit, weekly (7d) usage limit for **all models**, and the weekly limit for the **model-scoped bucket** (e.g. Fable) when your plan has one
 
@@ -69,7 +69,7 @@ extra rows; nothing is ever dropped or clipped.
 ```
 # 70 columns — same segments, terser, wrapped
 🏷️ fix auth module  📁 workspace/my-project  🌿 feat/auth
-🤖 Opus 5 (1M)  📟 v2.1.274  🎨 concise
+🤖 Opus 5 (1M)  🔑 you  📟 v2.1.274  🎨 concise
 🧠 Ctx: 56%  ⚡ S: 40% 2h31m  📊 W(all): 57% 1d13h  🎭 Fable: 5%
 ```
 
@@ -81,6 +81,36 @@ Terminal width is detected in this order: `CS_STATUSLINE_WIDTH` override → `$C
 reading the controlling pts device of an ancestor process → `100` fallback.
 
 The weekly segment is labelled `Weekly` when it is the only weekly number, and `Weekly(all)` once a per-model bucket sits next to it.
+
+#### Auth source
+
+When you run sessions against more than one account or provider side by side — a claude.ai
+login, a `claude --settings <file>` whose `env` block carries a token or a third-party
+endpoint, a `CLAUDE_CONFIG_DIR` profile — they look identical from inside a session. The
+`🔑` segment says which one this session uses. Claude Code keeps its own OAuth token and
+subscription variables out of the statusline's environment and puts no auth field on stdin,
+so the segment works it out from what is left; the first match wins:
+
+| # | Source | Shows |
+|---|--------|-------|
+| 1 | Launched with `--settings <file>` whose `env` sets an auth or endpoint variable, or which sets `apiKeyHelper` | the file name without `.json` |
+| 2 | `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` | `Bedrock` / `Vertex` / `Foundry` |
+| 3 | `ANTHROPIC_BASE_URL` other than `api.anthropic.com` | its host (terse tier: last two labels) |
+| 4 | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | `API key` |
+| 5 | Otherwise — the claude.ai login stored in the config dir | its email (terse tier: the part before `@`) |
+
+So `claude --settings ~/profiles/work.json` shows `🔑 work` with no extra setup. Only the
+*names* of variables in that file are read, never their values. Rule 1 reads the command line
+from `/proc/$CLAUDE_PID/cmdline`, falling back to `ps` (where a path containing a space is
+missed); inline JSON passed to `--settings` has no name, so rules 2–5 apply to it. The email
+in rule 5 is whatever the config dir currently holds, so it follows an account switcher that
+rewrites the login. `CS_AUTH_LABEL` replaces the text shown (set it in the settings file's
+`env` block); `CS_AUTH_SEGMENT=0` hides the segment.
+
+Sessions matched by rules 1–4 do not bill to the stored login, so the usage cache — read
+with that login — says nothing about them: they show only the Session/Weekly numbers Claude
+Code reports natively (none for third-party endpoints), no `~` cached values and no per-model
+bucket, and they never start the probe.
 
 ### 3. Usage Limit Monitoring
 
@@ -139,8 +169,10 @@ Tunables (env vars):
 | `CS_USAGE_ERROR_BACKOFF` | `900` | Slower retry after a failed probe |
 | `CS_USAGE_MAX_AGE` | `1800` | Ignore (and refresh) the cache once it is older than this |
 | `CS_USAGE_FORCE=1` | off | Bypass the floor (for a manual probe run) |
-| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API host for the usage read |
+| `CS_USAGE_BASE_URL` | `https://api.anthropic.com` | API host for the usage read. `ANTHROPIC_BASE_URL` is not followed: it usually points at a third-party endpoint, and the read carries your claude.ai OAuth token |
 | `CS_STATUSLINE_MAX_ROWS` | `1` | Row budget per segment group (see above) |
+| `CS_AUTH_LABEL` | unset | Text for the [auth source](#auth-source) segment |
+| `CS_AUTH_SEGMENT=0` | on | Hide the auth source segment |
 | `CS_STATUSLINE_LOG=1` | off | Write `statusline.log` (the whole stdin payload per render) |
 | `CS_STATUSLINE_LOG_MAX` | `1048576` | Rotate that log to `.log.1` past this size |
 
@@ -220,10 +252,6 @@ Examples:
   ever revises a percentage *down* within the same `resets_at` — a correction, a refund,
   rolling-window semantics — the higher cached value keeps winning until that window
   resets. Deliberate trade: it is what lets sessions order two readings with no clock.
-- **An API-key session borrows subscription numbers.** API-key auth gets no `rate_limits`
-  on stdin, so the `~` fill shows the cached *subscription* windows, which do not govern
-  that session at all. The statusline input carries no auth-type field to tell them apart.
-  Set `CS_MODEL_USAGE=0` in a config dir used that way.
 
 ### 7. Install & Upgrade
 
