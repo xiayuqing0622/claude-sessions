@@ -89,32 +89,41 @@ login, a `claude --settings <file>` whose `env` block carries a token or a third
 endpoint, a `CLAUDE_CONFIG_DIR` profile — they look identical from inside a session. The
 `🔑` segment says which one this session uses. Claude Code keeps its own OAuth token and
 subscription variables out of the statusline's environment and puts no auth field on stdin,
-so the segment works it out from what is left; the first match wins:
+so the segment reads the environment it does pass through; the first match wins:
 
 | # | Source | Shows |
 |---|--------|-------|
-| 1 | Launched with `--settings <file>` whose `env` sets an auth or endpoint variable, or which sets `apiKeyHelper` | the file name without `.json` |
+| 1 | `CS_AUTH_LABEL` | that label |
 | 2 | `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` | `Bedrock` / `Vertex` / `Foundry` |
 | 3 | `ANTHROPIC_BASE_URL` other than `api.anthropic.com` | its host (terse tier: last two labels) |
 | 4 | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | `API key` |
 | 5 | Otherwise — the claude.ai login stored in the config dir | its email (terse tier: the part before `@`) |
 
-So `claude --settings ~/profiles/work.json` shows `🔑 work` with no extra setup. Only the
-*names* of variables in that file are read, never their values. Rule 1 reads the command line
-from `/proc/$CLAUDE_PID/cmdline`, falling back to `ps` (where a path containing a space is
-missed). A background session may run in a pre-started spare process whose command line
-carries no flags; for those the flags are looked up in the agent-view daemon's
-`daemon/roster.json` by process or session id — an internal Claude Code file, so if its
-format changes such sessions fall back to rules 2–5. Inline JSON passed to `--settings` has
-no name, so rules 2–5 apply to it. The email
-in rule 5 is whatever the config dir currently holds, so it follows an account switcher that
-rewrites the login. `CS_AUTH_LABEL` replaces the text shown (set it in the settings file's
-`env` block); `CS_AUTH_SEGMENT=0` hides the segment.
+Give each launch profile a name by setting `CS_AUTH_LABEL` in its settings file:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "…",
+    "CS_AUTH_LABEL": "work"
+  }
+}
+```
+
+`claude --settings work.json` then shows `🔑 work`. A settings file's `env` block is loaded
+into every process that runs the session — including a background session that agent view
+hands to a pre-started process — so the label holds wherever the session runs. For a profile
+that swaps credentials through a variable Claude Code hides from the statusline (a
+`claude setup-token` token in `CLAUDE_CODE_OAUTH_TOKEN`), the label is the only way to tell;
+without it such a session shows the stored login's email. The email is whatever the config
+dir currently holds, so it follows an account switcher that rewrites the login.
+`CS_AUTH_SEGMENT=0` hides the segment.
 
 Sessions matched by rules 1–4 do not bill to the stored login, so the usage cache — read
 with that login — says nothing about them: they show only the Session/Weekly numbers Claude
 Code reports natively (none for third-party endpoints), no `~` cached values and no per-model
-bucket, and they never start the probe.
+bucket, and they never start the probe. Leave `CS_AUTH_LABEL` unset for the stored login
+itself.
 
 ### 3. Usage Limit Monitoring
 
@@ -175,7 +184,7 @@ Tunables (env vars):
 | `CS_USAGE_FORCE=1` | off | Bypass the floor (for a manual probe run) |
 | `CS_USAGE_BASE_URL` | `https://api.anthropic.com` | API host for the usage read. `ANTHROPIC_BASE_URL` is not followed: it usually points at a third-party endpoint, and the read carries your claude.ai OAuth token |
 | `CS_STATUSLINE_MAX_ROWS` | `1` | Row budget per segment group (see above) |
-| `CS_AUTH_LABEL` | unset | Text for the [auth source](#auth-source) segment |
+| `CS_AUTH_LABEL` | unset | Name of a launch profile, shown in the [auth source](#auth-source) segment |
 | `CS_AUTH_SEGMENT=0` | on | Hide the auth source segment |
 | `CS_STATUSLINE_LOG=1` | off | Write `statusline.log` (the whole stdin payload per render) |
 | `CS_STATUSLINE_LOG_MAX` | `1048576` | Rotate that log to `.log.1` past this size |

@@ -302,136 +302,56 @@ win_state() { # native_pct native_reset cached_pct cached_reset -> ahead|behind|
 }
 
 # ---- auth source: who this session bills to ----
-# Several ways to run Claude Code side by side (a claude.ai login, a per-session
-# --settings file carrying a token or a third-party endpoint, a CLAUDE_CONFIG_DIR
-# profile) look identical from inside a session. Claude Code strips its own OAuth
-# token and subscription variables from the statusline's environment and puts no auth
-# field on stdin, so the source is worked out from what is left, first match wins:
-#   1. --settings <file> on the command line whose env block sets an auth or endpoint
-#      variable (or which sets apiKeyHelper)   -> the file's name without .json
+# Sessions can run side by side against different accounts and providers, and look the
+# same from inside. Claude Code keeps its own OAuth token and subscription variables out
+# of the statusline's environment and puts no auth field on stdin, so the source comes
+# from the environment it does pass through, first match wins:
+#   1. CS_AUTH_LABEL                               -> the label (a named profile)
 #   2. CLAUDE_CODE_USE_BEDROCK / _VERTEX / _FOUNDRY -> the provider
-#   3. ANTHROPIC_BASE_URL that is not api.anthropic.com -> its host
-#   4. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN -> "API key"
-#   5. otherwise the claude.ai login recorded in the config dir -> its email
-# CS_AUTH_LABEL replaces the shown text without changing which source was detected.
-# Only variable names are ever inspected in a settings file, never their values.
-# auth_login=1 means the session runs on the login stored in the config dir — the only
-# case where the shared usage cache (fetched with that login) describes this session.
+#   3. ANTHROPIC_BASE_URL other than api.anthropic.com -> its host
+#   4. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN    -> "API key"
+#   5. otherwise the claude.ai login stored in the config dir -> its email
+# A profile that swaps credentials through a variable Claude Code hides (a token from
+# `claude setup-token` in CLAUDE_CODE_OAUTH_TOKEN) is only visible through rule 1, so its
+# settings file should set CS_AUTH_LABEL; a settings file's env block reaches every
+# process that runs the session, background ones included.
+# auth_login=1 means the session runs on the stored login — the only case where the
+# shared usage cache, fetched with that login, describes this session.
 auth_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;211m'; fi; }  # soft pink
-auth_t1=""; auth_t3=""; auth_login=1
+auth_t1=""; auth_t3=""; auth_login=0
 
-if [[ "${CLAUDE_PID:-}" =~ ^[0-9]+$ ]]; then
-  # The settings file named on the command line. /proc keeps argv intact; ps is the
-  # fallback elsewhere and splits on spaces, so a path containing one is missed there.
-  auth_args=()
-  if [ -r "/proc/$CLAUDE_PID/cmdline" ]; then
-    while IFS= read -r -d '' _a; do auth_args+=("$_a"); done < "/proc/$CLAUDE_PID/cmdline"
-  else
-    read -r -a auth_args <<< "$(ps -o args= -p "$CLAUDE_PID" 2>/dev/null)"
-  fi
-  auth_settings=""
-  for (( _i=0; _i<${#auth_args[@]}; _i++ )); do
-    case "${auth_args[$_i]}" in
-      --settings) auth_settings="${auth_args[$((_i+1))]:-}" ;;
-      --settings=*) auth_settings="${auth_args[$_i]#--settings=}" ;;
-    esac
-  done
-  unset _i _a
-  # A background session can be served by a pre-started spare process whose argv is just
-  # "claude bg-spare ..." — its flags reached it over a socket, not the command line. The
-  # daemon keeps them per worker in its roster (an internal, undocumented file, so this is
-  # only a fallback): match the worker by REPL pid or session id, take its respawn flags.
-  auth_roster="$CLAUDE_DIR/daemon/roster.json"
-  if [ -z "$auth_settings" ] && [ -f "$auth_roster" ]; then
-    if [ "$HAS_JQ" -eq 1 ]; then
-      auth_flags=$(jq -r --arg pid "$CLAUDE_PID" --arg sid "$session_id" '
-        [(.workers // {})[] | select(((.replPid|tostring) == $pid) or ((.pid|tostring) == $pid) or ((.sessionId // "") == $sid))][0]
-        | (.dispatch.respawnFlags // .dispatch.launch.flagArgs // [])[]' "$auth_roster" 2>/dev/null)
-    else
-      auth_flags=$(python3 -c '
-import json, sys
-try:
-    workers = (json.load(open(sys.argv[1])).get("workers") or {}).values()
-except Exception:
-    sys.exit(0)
-for w in workers:
-    if str(w.get("replPid")) == sys.argv[2] or str(w.get("pid")) == sys.argv[2] or (sys.argv[3] and w.get("sessionId") == sys.argv[3]):
-        d = w.get("dispatch") or {}
-        print("\n".join(d.get("respawnFlags") or (d.get("launch") or {}).get("flagArgs") or []))
-        break
-' "$auth_roster" "$CLAUDE_PID" "$session_id" 2>/dev/null)
-    fi
-    auth_prev=""
-    while IFS= read -r _f; do
-      case "$auth_prev" in --settings) auth_settings="$_f" ;; esac
-      case "$_f" in --settings=*) auth_settings="${_f#--settings=}" ;; esac
-      auth_prev="$_f"
-    done <<< "$auth_flags"
-    unset _f auth_prev
-  fi
-  # Inline JSON (--settings '{...}') has no name to show; only a file does.
-  if [ -n "$auth_settings" ] && [ -f "$auth_settings" ]; then
-    auth_keys=""
-    if [ "$HAS_JQ" -eq 1 ]; then
-      auth_keys=$(jq -r '((.env // {}) | keys[]), (if .apiKeyHelper then "apiKeyHelper" else empty end)' "$auth_settings" 2>/dev/null)
-    else
-      auth_keys=$(python3 -c '
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)
-print("\n".join((d.get("env") or {}).keys()))
-if d.get("apiKeyHelper"):
-    print("apiKeyHelper")
-' "$auth_settings" 2>/dev/null)
-    fi
-    if printf '%s\n' "$auth_keys" | grep -qxE 'CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_BASE_URL|CLAUDE_CODE_USE_(BEDROCK|VERTEX|FOUNDRY)|apiKeyHelper'; then
-      auth_t1=$(basename "$auth_settings" .json); auth_login=0
-    elif printf '%s\n' "$auth_keys" | grep -qx 'CLAUDE_CONFIG_DIR'; then
-      # A different config dir holds a different login: name the file, but the
-      # login (and the usage cache under CLAUDE_DIR) is still that dir's own.
-      auth_t1=$(basename "$auth_settings" .json)
-    fi
-  fi
-fi
-
-if [ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]; then [ -n "$auth_t1" ] || auth_t1="Bedrock"; auth_login=0
-elif [ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]; then [ -n "$auth_t1" ] || auth_t1="Vertex"; auth_login=0
-elif [ -n "${CLAUDE_CODE_USE_FOUNDRY:-}" ]; then [ -n "$auth_t1" ] || auth_t1="Foundry"; auth_login=0
-fi
-
-if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-  auth_host="${ANTHROPIC_BASE_URL#*://}"; auth_host="${auth_host%%/*}"; auth_host="${auth_host%%:*}"
+if [ -n "${CS_AUTH_LABEL:-}" ]; then
+  auth_t1="$CS_AUTH_LABEL"
+elif [ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]; then
+  auth_t1="Bedrock"
+elif [ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]; then
+  auth_t1="Vertex"
+elif [ -n "${CLAUDE_CODE_USE_FOUNDRY:-}" ]; then
+  auth_t1="Foundry"
+else
+  auth_host="${ANTHROPIC_BASE_URL:-}"; auth_host="${auth_host#*://}"
+  auth_host="${auth_host%%/*}"; auth_host="${auth_host%%:*}"
   if [ -n "$auth_host" ] && [ "$auth_host" != "api.anthropic.com" ]; then
-    auth_login=0
-    if [ -z "$auth_t1" ]; then
-      auth_t1="$auth_host"
-      # Terse form keeps the last two labels: ark.cn-beijing.example.com -> example.com
-      auth_t3=$(printf '%s' "$auth_host" | awk -F. 'NF>2 && $NF !~ /^[0-9]+$/ {print $(NF-1)"."$NF; next} {print}')
+    auth_t1="$auth_host"
+    # Terse form keeps the last two labels: api.eu.example.com -> example.com
+    auth_t3=$(printf '%s' "$auth_host" | awk -F. 'NF>2 && $NF !~ /^[0-9]+$/ {print $(NF-1)"."$NF; next} {print}')
+  elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    auth_t1="API key"
+  else
+    auth_login=1
+    # The global config lives beside the config dir by default, inside it when
+    # CLAUDE_CONFIG_DIR is set.
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then auth_cfg="$CLAUDE_CONFIG_DIR/.claude.json"; else auth_cfg="$HOME/.claude.json"; fi
+    if [ -f "$auth_cfg" ]; then
+      if [ "$HAS_JQ" -eq 1 ]; then
+        auth_t1=$(jq -r '.oauthAccount.emailAddress // empty' "$auth_cfg" 2>/dev/null)
+      else
+        auth_t1=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("oauthAccount") or {}).get("emailAddress") or "")' "$auth_cfg" 2>/dev/null)
+      fi
+      auth_t3="${auth_t1%%@*}"
     fi
   fi
 fi
-
-if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-  [ -n "$auth_t1" ] || auth_t1="API key"; auth_login=0
-fi
-
-if [ -z "$auth_t1" ]; then
-  # The global config lives beside the config dir by default, inside it when
-  # CLAUDE_CONFIG_DIR is set.
-  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then auth_cfg="$CLAUDE_CONFIG_DIR/.claude.json"; else auth_cfg="$HOME/.claude.json"; fi
-  if [ -f "$auth_cfg" ]; then
-    if [ "$HAS_JQ" -eq 1 ]; then
-      auth_t1=$(jq -r '.oauthAccount.emailAddress // empty' "$auth_cfg" 2>/dev/null)
-    else
-      auth_t1=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("oauthAccount") or {}).get("emailAddress") or "")' "$auth_cfg" 2>/dev/null)
-    fi
-    auth_t3="${auth_t1%%@*}"
-  fi
-fi
-
-if [ -n "${CS_AUTH_LABEL:-}" ]; then auth_t1="$CS_AUTH_LABEL"; auth_t3=""; fi
 [ -n "$auth_t3" ] || auth_t3="$auth_t1"
 if [ "${CS_AUTH_SEGMENT:-1}" = "0" ]; then auth_t1=""; auth_t3=""; fi
 
