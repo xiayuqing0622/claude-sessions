@@ -102,7 +102,11 @@ so the segment works it out from what is left; the first match wins:
 So `claude --settings ~/profiles/work.json` shows `🔑 work` with no extra setup. Only the
 *names* of variables in that file are read, never their values. Rule 1 reads the command line
 from `/proc/$CLAUDE_PID/cmdline`, falling back to `ps` (where a path containing a space is
-missed); inline JSON passed to `--settings` has no name, so rules 2–5 apply to it. The email
+missed). A background session may run in a pre-started spare process whose command line
+carries no flags; for those the flags are looked up in the agent-view daemon's
+`daemon/roster.json` by process or session id — an internal Claude Code file, so if its
+format changes such sessions fall back to rules 2–5. Inline JSON passed to `--settings` has
+no name, so rules 2–5 apply to it. The email
 in rule 5 is whatever the config dir currently holds, so it follows an account switcher that
 rewrites the login. `CS_AUTH_LABEL` replaces the text shown (set it in the settings file's
 `env` block); `CS_AUTH_SEGMENT=0` hides the segment.

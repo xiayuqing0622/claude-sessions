@@ -148,7 +148,7 @@ extract_json_string() {
   field="${field%% *}"  # Remove any jq operators
   
   # Try to extract string value (quoted)
-  local value=$(echo "$json" | grep -o "\"\${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/')
+  local value=$(echo "$json" | grep -o "\"${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/')
   
   # Convert escaped backslashes to forward slashes for Windows paths
   if [ -n "$value" ]; then
@@ -157,7 +157,7 @@ extract_json_string() {
   
   # If no string value found, try to extract number value (unquoted)
   if [ -z "$value" ] || [ "$value" = "null" ]; then
-    value=$(echo "$json" | grep -o "\"\${field}\"[[:space:]]*:[[:space:]]*[0-9.]\+" | head -1 | sed 's/.*:[[:space:]]*\([0-9.]\+\).*/\1/')
+    value=$(echo "$json" | grep -o "\"${field}\"[[:space:]]*:[[:space:]]*[0-9.]\+" | head -1 | sed 's/.*:[[:space:]]*\([0-9.]\+\).*/\1/')
   fi
   
   # Return value or default
@@ -337,6 +337,38 @@ if [[ "${CLAUDE_PID:-}" =~ ^[0-9]+$ ]]; then
     esac
   done
   unset _i _a
+  # A background session can be served by a pre-started spare process whose argv is just
+  # "claude bg-spare ..." — its flags reached it over a socket, not the command line. The
+  # daemon keeps them per worker in its roster (an internal, undocumented file, so this is
+  # only a fallback): match the worker by REPL pid or session id, take its respawn flags.
+  auth_roster="$CLAUDE_DIR/daemon/roster.json"
+  if [ -z "$auth_settings" ] && [ -f "$auth_roster" ]; then
+    if [ "$HAS_JQ" -eq 1 ]; then
+      auth_flags=$(jq -r --arg pid "$CLAUDE_PID" --arg sid "$session_id" '
+        [(.workers // {})[] | select(((.replPid|tostring) == $pid) or ((.pid|tostring) == $pid) or ((.sessionId // "") == $sid))][0]
+        | (.dispatch.respawnFlags // .dispatch.launch.flagArgs // [])[]' "$auth_roster" 2>/dev/null)
+    else
+      auth_flags=$(python3 -c '
+import json, sys
+try:
+    workers = (json.load(open(sys.argv[1])).get("workers") or {}).values()
+except Exception:
+    sys.exit(0)
+for w in workers:
+    if str(w.get("replPid")) == sys.argv[2] or str(w.get("pid")) == sys.argv[2] or (sys.argv[3] and w.get("sessionId") == sys.argv[3]):
+        d = w.get("dispatch") or {}
+        print("\n".join(d.get("respawnFlags") or (d.get("launch") or {}).get("flagArgs") or []))
+        break
+' "$auth_roster" "$CLAUDE_PID" "$session_id" 2>/dev/null)
+    fi
+    auth_prev=""
+    while IFS= read -r _f; do
+      case "$auth_prev" in --settings) auth_settings="$_f" ;; esac
+      case "$_f" in --settings=*) auth_settings="${_f#--settings=}" ;; esac
+      auth_prev="$_f"
+    done <<< "$auth_flags"
+    unset _f auth_prev
+  fi
   # Inline JSON (--settings '{...}') has no name to show; only a file does.
   if [ -n "$auth_settings" ] && [ -f "$auth_settings" ]; then
     auth_keys=""
