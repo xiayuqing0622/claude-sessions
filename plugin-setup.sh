@@ -4,9 +4,11 @@
 #   1. statusLine + subagentStatusLine config in $CLAUDE_CONFIG_DIR/settings.json
 #      (defaults to ~/.claude)
 #   2. symlinking `cs` into ~/bin so it's runnable from the terminal
+# Both go through $CLAUDE_DIR/claude-sessions, a symlink to the installed plugin version that
+# the SessionStart hook (refresh-link.sh) keeps current, so a plugin update needs no re-run.
 set -euo pipefail
 
-PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SETTINGS="$CLAUDE_DIR/settings.json"
 BIN_DIR="${1:-$HOME/bin}"
@@ -18,17 +20,28 @@ NC='\033[0m'
 
 mkdir -p "$BIN_DIR" "$CLAUDE_DIR"
 
+# 0. Version-free path to this plugin. Only an absent path or an existing symlink is replaced;
+#    if something else sits there, fall back to the versioned path (it then goes stale on update).
+STABLE="$CLAUDE_DIR/claude-sessions"
+if [ -L "$STABLE" ] || [ ! -e "$STABLE" ]; then
+  [ "$(readlink "$STABLE" 2>/dev/null)" = "$PLUGIN_ROOT" ] || ln -sfn "$PLUGIN_ROOT" "$STABLE"
+  ROOT="$STABLE"
+else
+  echo -e "${YELLOW}$STABLE exists and is not a symlink; using the versioned path, re-run setup after each update${NC}"
+  ROOT="$PLUGIN_ROOT"
+fi
+
 # 1. Symlink cs to ~/bin
 CS_DST="$BIN_DIR/cs"
-if [ -L "$CS_DST" ] && [ "$(readlink "$CS_DST")" = "$PLUGIN_ROOT/cs" ]; then
+if [ -L "$CS_DST" ] && [ "$(readlink "$CS_DST")" = "$ROOT/cs" ]; then
   echo -e "${DIM}cs: already linked${NC}"
 else
-  ln -sfn "$PLUGIN_ROOT/cs" "$CS_DST"
+  ln -sfn "$ROOT/cs" "$CS_DST"
   echo -e "${GREEN}cs → $CS_DST${NC}"
 fi
 
 # 2. Configure statusLine in user settings.json (preserve existing keys)
-python3 - "$SETTINGS" "$PLUGIN_ROOT/statusline.sh" "$PLUGIN_ROOT/subagent-statusline.sh" <<'PY'
+python3 - "$SETTINGS" "$ROOT/statusline.sh" "$ROOT/subagent-statusline.sh" <<'PY'
 import json, os, sys
 path, sl, sub = sys.argv[1], sys.argv[2], sys.argv[3]
 data = {}

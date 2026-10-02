@@ -16,6 +16,6 @@ Steps:
 
 2. If `PLUGIN_ROOT` is empty, tell the user the plugin isn't installed and to run `/plugin install claude-sessions@claude-sessions` first, then exit.
 
-3. Otherwise run `bash "$PLUGIN_ROOT/plugin-setup.sh"` and show the output.
+3. Otherwise run `bash "$PLUGIN_ROOT/plugin-setup.sh"` and show the output. It links `$CLAUDE_DIR/claude-sessions` to this plugin version and points the statusline settings and `cs` at that link, so they survive plugin updates.
 
 4. Confirm to the user: hooks were registered automatically by the plugin; the statusline, the agent-panel model rows (unless the user's own `subagentStatusLine` was kept) and `cs` PATH are now set.
