@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # plugin-setup.sh — finish claude-sessions setup after `/plugin install`.
 # Plugin auto-registers hooks; this script handles the two things plugins can't:
-#   1. statusLine config in $CLAUDE_CONFIG_DIR/settings.json (defaults to ~/.claude)
+#   1. statusLine + subagentStatusLine config in $CLAUDE_CONFIG_DIR/settings.json
+#      (defaults to ~/.claude)
 #   2. symlinking `cs` into ~/bin so it's runnable from the terminal
 set -euo pipefail
 
@@ -27,9 +28,9 @@ else
 fi
 
 # 2. Configure statusLine in user settings.json (preserve existing keys)
-python3 - "$SETTINGS" "$PLUGIN_ROOT/statusline.sh" <<'PY'
+python3 - "$SETTINGS" "$PLUGIN_ROOT/statusline.sh" "$PLUGIN_ROOT/subagent-statusline.sh" <<'PY'
 import json, os, sys
-path, sl = sys.argv[1], sys.argv[2]
+path, sl, sub = sys.argv[1], sys.argv[2], sys.argv[3]
 data = {}
 if os.path.exists(path):
     try:
@@ -46,11 +47,22 @@ data["statusLine"] = {
     "padding": 0,
     "refreshInterval": existing.get("refreshInterval", 60),
 }
+# subagentStatusLine styles the rows of the agent panel (model per subagent). Unlike
+# statusLine this is not ours alone: leave it untouched if the user pointed it at their own
+# script, and only (re)write it when it is unset or already ours.
+sub_existing = (data.get("subagentStatusLine") or {}).get("command", "")
+sub_msg = None
+if not sub_existing or "claude-sessions" in sub_existing:
+    data["subagentStatusLine"] = {"type": "command", "command": sub}
+    sub_msg = f"\033[0;32msubagentStatusLine → {sub}\033[0m"
+else:
+    sub_msg = f"\033[2msubagentStatusLine: keeping your own ({sub_existing})\033[0m"
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
     f.write("\n")
 print(f"\033[0;32mstatusLine → {sl}\033[0m")
+print(sub_msg)
 PY
 
 # 3. Ensure BIN_DIR is on PATH (only adds to rc once)

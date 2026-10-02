@@ -125,6 +125,42 @@ Code reports natively (none for third-party endpoints), no `~` cached values and
 bucket, and they never start the probe. Leave `CS_AUTH_LABEL` unset for the stored login
 itself.
 
+#### Agent panel: model per subagent
+
+The statusline always follows the **lead** session: `/model` and the `🤖` segment show the
+lead's model, and stay put when you look at a subagent in the agent panel (the one below
+the prompt). A subagent's model is fixed when it spawns — and can differ from the lead's, e.g.
+via `CLAUDE_CODE_SUBAGENT_MODEL` — so the main statusline has nothing to show for it.
+
+`subagent-statusline.sh` fills that gap through Claude Code's `subagentStatusLine`
+setting, which styles each row of the agent panel. Every subagent row gets the model the
+agent **actually runs on** (the resolved ID, e.g. `sonnet-5-5`, `glm-5.3-flash`), plus effort,
+token count and context %:
+
+```
+builder · sonnet-5-5 · high · 29k (14%) · Implement the retry logic
+```
+
+Models are colored by family (opus / sonnet / haiku / fable); anything else — GLM, Kimi, a
+custom gateway model — is yellow, so a subagent that ended up on an unexpected model stands
+out. The setup step registers it next to `statusLine`:
+
+```json
+"subagentStatusLine": { "type": "command", "command": "…/subagent-statusline.sh" }
+```
+
+**Agent teams are not covered.** With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, a subagent
+Claude gives a `name` launches as a *teammate*, and teammate rows are never sent to this
+script — they keep the default `name · description · tokens` row. With teams off
+(`=0`) a named subagent is an ordinary one: it shows up here with its model and can still be
+messaged by name.
+
+Unlike `statusLine`, the installer leaves `subagentStatusLine` alone if you already point it
+at your own script. It needs `jq` and **needs Claude Code v2.1.205+** (earlier versions do
+not send the per-row `model`); without either, rows keep their default rendering.
+`CS_SUBAGENT_DEBUG=1` appends the raw stdin to `subagent-statusline-input.jsonl` in your
+Claude config dir — useful to see exactly which rows and fields Claude Code sends.
+
 ### 3. Usage Limit Monitoring
 
 Two sources, by necessity:
@@ -341,7 +377,7 @@ Custom bin directory: `./cs install /usr/local/bin`
 
 - Python 3.6+ — for the `cs` dashboard, auto-labeling, and the per-model usage probe
 - Linux (the `cs` dashboard uses the `/proc` filesystem)
-- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`
+- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`. The agent-panel script (`subagent-statusline.sh`) has no fallback: without `jq` it prints nothing and the panel keeps its default rows
 
 Session and weekly (all models) limits come straight from Claude Code's statusline input — no API call, no OAuth token. Only the per-model weekly bucket needs the `usage-probe.sh` read, which uses Python's `urllib` (no `curl` dependency) and can be switched off with `CS_MODEL_USAGE=0`.
 
