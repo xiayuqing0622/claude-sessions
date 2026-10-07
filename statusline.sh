@@ -12,6 +12,25 @@ if command -v jq >/dev/null 2>&1; then
   HAS_JQ=1
 fi
 
+# ---- context state ----
+# Leave this session's context size where `cs ctx wait` can read it. ctx-state.sh sits next
+# to the *real* script: `cs install` symlinks this file into $CLAUDE_DIR, where the script's
+# own directory alone would miss it. It prints nothing and cannot affect the rendering below.
+sl_self="${BASH_SOURCE[0]}"
+for _hop in 1 2 3 4 5; do
+  [ -L "$sl_self" ] || break
+  _link=$(readlink "$sl_self")
+  case "$_link" in
+    /*) sl_self="$_link" ;;
+    *)  case "$sl_self" in */*) sl_self="${sl_self%/*}/$_link" ;; *) sl_self="$_link" ;; esac ;;
+  esac
+done
+case "$sl_self" in */*) sl_real_dir="${sl_self%/*}" ;; *) sl_real_dir="." ;; esac
+unset _hop _link
+if [ "$HAS_JQ" -eq 1 ] && [ -x "$sl_real_dir/ctx-state.sh" ]; then
+  "$sl_real_dir/ctx-state.sh" main <<< "$input" >/dev/null 2>&1 || true
+fi
+
 # ---- terminal width detection ----
 # Claude Code clips each row of statusline output to the terminal width, so we adapt
 # line 2 verbosity to avoid the bottom row being hidden on narrow terminals.
@@ -531,18 +550,8 @@ if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ "$auth_login" -eq 1 ]; then
   fi
 
   if [ "$mu_need" -eq 1 ]; then
-    # Find usage-probe.sh next to the *real* script: `cs install` symlinks this file
-    # into $CLAUDE_DIR, where SCRIPT_DIR alone would miss the probe.
-    sl_self="${BASH_SOURCE[0]}"
-    for _hop in 1 2 3 4 5; do
-      [ -L "$sl_self" ] || break
-      _link=$(readlink "$sl_self")
-      case "$_link" in
-        /*) sl_self="$_link" ;;
-        *)  sl_self="$(dirname "$sl_self")/$_link" ;;
-      esac
-    done
-    probe="$(cd "$(dirname "$sl_self")" 2>/dev/null && pwd)/usage-probe.sh"
+    # Find usage-probe.sh next to the *real* script (see "context state" above).
+    probe="$sl_real_dir/usage-probe.sh"
     [ -x "$probe" ] || probe="$SCRIPT_DIR/usage-probe.sh"
     # Detach every fd: a background child still holding our stdout would keep Claude
     # Code waiting on the pipe before it can draw the statusline.

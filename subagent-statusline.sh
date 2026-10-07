@@ -8,6 +8,8 @@
 # description, ...}]}. For every row we want to override we print one JSON line
 # {"id": "...", "content": "..."}; rows we do not print keep the default rendering.
 #
+# Besides drawing rows it records each subagent's context size through ctx-state.sh.
+#
 # What it adds over the default `name · description · tokens` row: the model each agent
 # actually runs on, which the main statusline cannot show (it always follows the lead).
 #
@@ -25,6 +27,14 @@ fi
 
 # Without jq we print nothing, which leaves every row on the default rendering.
 command -v jq >/dev/null 2>&1 || exit 0
+
+# Leave each subagent's context size where `cs ctx wait` can read it. ctx-state.sh prints
+# nothing and cannot affect the rows below.
+ctx_dir="${BASH_SOURCE[0]%/*}"
+[ "$ctx_dir" = "${BASH_SOURCE[0]}" ] && ctx_dir=.
+if [ -x "$ctx_dir/ctx-state.sh" ]; then
+  "$ctx_dir/ctx-state.sh" subagents <<< "$input" >/dev/null 2>&1 || true
+fi
 
 use_color=1
 [ -n "${NO_COLOR:-}" ] && use_color=0

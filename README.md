@@ -161,7 +161,55 @@ not send the per-row `model`); without either, rows keep their default rendering
 `CS_SUBAGENT_DEBUG=1` appends the raw stdin to `subagent-statusline-input.jsonl` in your
 Claude config dir — useful to see exactly which rows and fields Claude Code sends.
 
-### 3. Usage Limit Monitoring
+### 3. Context State and `cs ctx wait`
+
+Claude Code hands the statusline the current context size of the session and of every subagent on each refresh. `statusline.sh` and `subagent-statusline.sh` also leave it in a small file, so other programs — a lead session waiting on a builder, for instance — can read it without polling Claude Code. `ctx-state.sh` is the one script that writes these files; both statuslines call it.
+
+**State files.** One JSON file per context holder, where a holder is the session itself or one of its subagents:
+
+```
+$CLAUDE_CONFIG_DIR/cs-ctx/<session_id>/<holder>.json      # default ~/.claude
+{"name": "builder", "status": "running", "tokenCount": 28607, "contextWindowSize": 200000}
+```
+
+- `<holder>` is `main` for the session itself and the subagent id for a subagent.
+- `name`: the subagent's name, or its label when it has no name; `null` for `main`.
+- `status`: the subagent's status as Claude Code reports it (`running`, `completed`); `null` for `main`.
+- `tokenCount`: the current context size in tokens, `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+- `contextWindowSize`: the window of the model that holder runs on, in tokens.
+
+**When files are written.**
+
+- On every statusline call, including after a subagent has `completed`: Claude Code keeps calling then, so a file's modification time says whether the session is still alive. There is no time field inside the file.
+- Not for `main` before the first reply (`current_usage` is `null`), and not when the window size is missing or not above 0. An existing file is left untouched in both cases.
+- Each file is written under a temporary name and renamed, so a reader never sees half a file. A write failure never changes what the statusline prints.
+- Without `jq` nothing is written; the statusline itself renders as before.
+
+**Cleanup.** When writing, `ctx-state.sh` removes every session directory whose newest file was modified more than a day ago. It does this at most once an hour, throttled by the modification time of `cs-ctx/.last-cleanup`, and never reads file contents.
+
+**`cs ctx wait`** blocks until one holder's context reaches a threshold, then prints one line and exits. Nothing is printed while waiting, so a background job running it wakes its caller exactly once.
+
+```
+cs ctx wait --at 60                                  # the current session, at 60% of its window
+cs ctx wait --at 60 --target builder-1               # a subagent, by name or by id
+cs ctx wait --at 80 --session <session id> --target main
+```
+
+- `--at <percent>`: reached when `tokenCount * 100 >= percent * contextWindowSize`, compared without rounding.
+- `--target`: `main` (default), a subagent id, or a subagent name; an id is tried first, then the name.
+- `--session`: defaults to `$CLAUDE_CODE_SESSION_ID`; with neither, the command fails.
+- `--interval` (default 5) is the seconds between reads of the local file; `--no-data-after` (default 300) is how long a missing or unchanged file is tolerated before giving up.
+
+| Output line | Meaning | Exit code |
+|---|---|---|
+| `REACHED <pct>% tokenCount=<n> contextWindowSize=<w> target=<name>` | threshold reached (wins over `COMPLETED` when both hold) | 0 |
+| `COMPLETED target=<name> <pct>%` | the subagent finished below the threshold | 0 |
+| `NO-DATA target=<name> reason=<why>` | no file yet after `--no-data-after`, or the file stopped updating | 2 |
+| `AMBIGUOUS target=<name> ids=<id>,...` | several subagents share that name; use an id | 2 |
+
+Usage errors (missing `--at`, no session id) exit with 1. `cs ctx wait --help` has the full reference.
+
+### 4. Usage Limit Monitoring
 
 Two sources, by necessity:
 
@@ -232,7 +280,7 @@ Tunables (env vars):
 > `usage-probe.sh` is not a revival of it: it makes no model call, it only reads the
 > usage endpoint, and only for the one number Claude Code doesn't hand us.
 
-### 4. Multiple Sessions
+### 5. Multiple Sessions
 
 Usage limits are account-wide, but each Claude Code session only learns about them from
 **its own** API responses — `rate_limits` on the statusline stdin is a per-session
@@ -275,7 +323,7 @@ So the session doing the work pays for the refresh, and every other window picks
 result up on its next render — within `refreshInterval` seconds, without asking the API
 anything itself.
 
-### 5. Smart Auto-labeling
+### 6. Smart Auto-labeling
 
 A PreToolUse hook (`cs-hook`) automatically labels each session on first tool use:
 
@@ -292,7 +340,7 @@ Examples:
 | why is usage limit not showing for other users on this machine | debug usage limit display |
 | fix bug in auth | fix bug in auth |
 
-### 6. Known Limitations
+### 7. Known Limitations
 
 - **Cached numbers can be up to `CS_USAGE_MAX_AGE` old.** A `~` value is normally seconds
   to minutes behind; if every session is idle it can be up to 30 minutes behind before the
@@ -302,7 +350,7 @@ Examples:
   rolling-window semantics — the higher cached value keeps winning until that window
   resets. Deliberate trade: it is what lets sessions order two readings with no clock.
 
-### 7. Install & Upgrade
+### 8. Install & Upgrade
 
 **Recommended — Claude Code plugin** (zero-config hooks):
 
@@ -379,7 +427,7 @@ Custom bin directory: `./cs install /usr/local/bin`
 
 - Python 3.6+ — for the `cs` dashboard, auto-labeling, and the per-model usage probe
 - Linux (the `cs` dashboard uses the `/proc` filesystem)
-- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`. The agent-panel script (`subagent-statusline.sh`) has no fallback: without `jq` it prints nothing and the panel keeps its default rows
+- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`. The agent-panel script (`subagent-statusline.sh`) has no fallback: without `jq` it prints nothing and the panel keeps its default rows. Context state files (see Context State) are only written when `jq` is present
 
 Session and weekly (all models) limits come straight from Claude Code's statusline input — no API call, no OAuth token. Only the per-model weekly bucket needs the `usage-probe.sh` read, which uses Python's `urllib` (no `curl` dependency) and can be switched off with `CS_MODEL_USAGE=0`.
 
