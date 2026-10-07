@@ -180,7 +180,7 @@ $CLAUDE_CONFIG_DIR/cs-ctx/<session_id>/<holder>.json      # default ~/.claude
 
 **When files are written.**
 
-- On every statusline call, including after a subagent has `completed`: Claude Code keeps calling then, so a file's modification time says whether the session is still alive. There is no time field inside the file.
+- On every statusline call. A file's modification time says how fresh its numbers are; there is no time field inside the file. Claude Code stops calling for a subagent some time after it has `completed`, so that file stops being refreshed and keeps `status` `completed`: trust its status, not its age. When the statusline has a `refreshInterval` configured, `main.json` is also refreshed while the session is idle.
 - Not for `main` before the first reply (`current_usage` is `null`), and not when the window size is missing or not above 0. An existing file is left untouched in both cases.
 - Each file is written under a temporary name and renamed, so a reader never sees half a file. A write failure never changes what the statusline prints.
 - Without `jq` nothing is written; the statusline itself renders as before.

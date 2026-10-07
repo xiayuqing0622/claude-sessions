@@ -14,10 +14,11 @@
 #   tokenCount         current context size: input + cache read + cache creation tokens
 #   contextWindowSize  window of the model the holder runs on
 #
-# The file is rewritten on every call, even after a subagent has completed, because Claude
-# Code keeps calling the status line then: the file's modification time is the only signal
-# that the session is still alive. Nothing is written when the context size is not known yet
-# (no usage before the first reply) or the window size is missing.
+# The file is rewritten on every call, so its modification time says how fresh the numbers
+# are. Claude Code stops calling for a subagent some time after it has completed; that file
+# then keeps `status: completed` and only ages, so a reader trusts its status, not its age.
+# Nothing is written when the context size is not known yet (no usage before the first
+# reply) or the window size is missing.
 #
 # This script must never disturb the status line: it prints nothing, always exits 0, and
 # skips silently without jq. Each file is written to a temporary name and renamed, so a
