@@ -362,7 +362,7 @@ Examples:
 
 Then **exit and restart Claude Code** — the auto-labeling hook only loads on startup.
 
-The plugin auto-registers `cs-hook`. The `/claude-sessions:setup` slash command runs once to configure the statusline and symlink `cs` into `~/bin`. Both point at `~/.claude/claude-sessions`, a symlink to the installed plugin version that a SessionStart hook keeps current, so plugin updates need no re-run of setup.
+The plugin auto-registers `cs-hook`. The `/claude-sessions:setup` slash command runs once to configure the statusline and symlink `cs` into `~/bin`. Both point at `~/.claude/claude-sessions`, a symlink to the newest installed plugin version that a SessionStart hook keeps current (it only moves forward, so a session that started before an update cannot point it back), so plugin updates need no re-run of setup.
 
 **Upgrading** — Claude Code caches plugin files by version, so pulling a new commit isn't enough:
 
