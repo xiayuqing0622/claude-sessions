@@ -269,8 +269,10 @@ sessions. Both sides of the display know that:
 - The native `rate_limits` are dropped the same way. Claude Code refreshes them from the
   response headers of *that session's* API calls, so right after a switch every open
   window is still quoting the old account — and a window you never type in again would
-  quote it forever. The session's own transcript dates it: untouched since the switch
-  means no response since the switch either, so the numbers go and the cache takes over.
+  quote it forever. The session's own transcript dates it: if its last reply (the last
+  assistant entry — not merely the last write, since prompts, slash commands and away
+  summaries land there too) predates the switch, there has been no response since, so
+  the numbers go and the cache takes over.
   This applies only to sessions on the stored login; one matched by rules 1–4 of the
   [auth source](#auth-source) never billed to it and keeps its numbers.
 
@@ -377,9 +379,15 @@ Examples:
   rolling-window semantics — the higher cached value keeps winning until that window
   resets. Deliberate trade: it is what lets sessions order two readings with no clock.
 - **Account switching is detected on render, not on the switch.** There is no event to
-  hook, so the first statusline render after the switch is what timestamps it in
-  `$CLAUDE_CONFIG_DIR/account-state`. A switch made while every session is closed is
-  noticed by the first session to render afterwards, which is early enough.
+  hook, so the first render after the switch by a session on the stored login is what
+  timestamps it in `$CLAUDE_CONFIG_DIR/account-state`. A switch made while every such
+  session is closed is noticed by the first one to render afterwards, which is early
+  enough.
+- **A session's numbers are dated by its last reply, not its last API call.** A call that
+  leaves no assistant entry in the session's transcript — a subagent's, an away
+  summary's — does not count, so a session doing only that kind of work right after a
+  switch shows the cache instead of its own numbers until its next reply. The error is
+  always toward the cache, never toward the account you left.
 - **A window-rollover in the first `CS_ACCOUNT_GRACE` after a switch can show a cached
   number for up to `CS_USAGE_MIN_INTERVAL`.** It only affects sessions whose transcript
   is unreadable, where the switch has to be bounded by a timer instead.
@@ -430,12 +438,12 @@ echo '' | your-statusline-cmd    # or inspect: the input JSON has a top-level "r
 **Usage still shows the account I switched away from.** Check what the statusline thinks is logged in:
 
 ```bash
-jq -r '.oauthAccount.accountUuid' ~/.claude.json                       # the live account
+jq -r '.oauthAccount.accountUuid' "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"   # the live account
 jq -r '.account' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/model-usage-cache.json"   # the cached one
 cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/account-state"                # account + when it changed
 ```
 
-If the first two disagree and stay disagreeing, the probe cannot refresh — run it by hand (`CS_USAGE_FORCE=1 ~/.claude/usage-probe.sh`) and read its `errorMsg`. If they agree but a window still shows the old numbers, that session has not made an API call since the switch and its transcript looks newer than the switch; send it a prompt. `CS_STATUSLINE_LOG=1` logs an `Account:` line per render with all of it.
+If the first two disagree and stay disagreeing, the probe cannot refresh — run it by hand (`CS_USAGE_FORCE=1 ~/.claude/usage-probe.sh`) and read its `errorMsg`. If they agree but a window still shows the old numbers, that window's transcript has a reply dated after the switch, so its numbers are taken as current. `CS_STATUSLINE_LOG=1` logs an `Account:` line per render with all of it: the live account, when it changed, the session's last reply, the cache's account, and whether the session's own numbers were dropped.
 
 **Weekly shows only one number (no `🎭 Fable` segment).** The per-model bucket comes from `usage-probe.sh`, not from Claude Code. Check, in order:
 

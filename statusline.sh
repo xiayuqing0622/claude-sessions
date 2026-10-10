@@ -282,52 +282,6 @@ rl_weekly_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;153m'; fi;
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
-# ---- which account is logged in, and since when ----
-# Every usage number below belongs to one account, and an account switcher (claude-swap
-# and friends) can replace it under a running session. Claude Code records the live one
-# in the oauthAccount section of its global config, which the switcher rewrites in the
-# same breath as the credential — so that uuid is the cheapest honest answer to "whose
-# limits am I looking at". Path resolution mirrors Claude Code's: a legacy .config.json
-# inside the config dir wins, else .claude.json, which stays at $HOME even when
-# CLAUDE_CONFIG_DIR moves everything else.
-if [ -f "$CLAUDE_DIR/.config.json" ]; then
-  CS_CONFIG_JSON="$CLAUDE_DIR/.config.json"
-elif [ -n "$CLAUDE_CONFIG_DIR" ]; then
-  CS_CONFIG_JSON="$CLAUDE_CONFIG_DIR/.claude.json"
-else
-  CS_CONFIG_JSON="$HOME/.claude.json"
-fi
-acct_id=""
-if [ -f "$CS_CONFIG_JSON" ]; then
-  if [ "$HAS_JQ" -eq 1 ]; then
-    acct_id=$(jq -r '.oauthAccount.accountUuid // empty' "$CS_CONFIG_JSON" 2>/dev/null)
-  else
-    acct_id=$(grep -o '"accountUuid"[[:space:]]*:[[:space:]]*"[^"]*"' "$CS_CONFIG_JSON" 2>/dev/null \
-      | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
-  fi
-fi
-
-# The switch itself has no event to hook, so the first session to render after it is the
-# one that timestamps it, in a file every session reads. The very first run has nothing
-# to compare against and records the account without claiming a switch happened.
-ACCOUNT_STATE="$CLAUDE_DIR/account-state"
-acct_changed_at=0
-if [ -n "$acct_id" ]; then
-  acct_prev_id=""; acct_prev_at=0
-  if [ -f "$ACCOUNT_STATE" ]; then
-    IFS=$'\t' read -r acct_prev_id acct_prev_at < "$ACCOUNT_STATE"
-    [[ "$acct_prev_at" =~ ^[0-9]+$ ]] || acct_prev_at=0
-  fi
-  if [ "$acct_prev_id" = "$acct_id" ]; then
-    acct_changed_at="$acct_prev_at"
-  else
-    [ -n "$acct_prev_id" ] && acct_changed_at=$(date +%s)
-    printf '%s\t%s\n' "$acct_id" "$acct_changed_at" > "$ACCOUNT_STATE.$$" 2>/dev/null \
-      && mv -f "$ACCOUNT_STATE.$$" "$ACCOUNT_STATE" 2>/dev/null
-    rm -f "$ACCOUNT_STATE.$$" 2>/dev/null
-  fi
-fi
-
 # ---- auth source: who this session bills to ----
 # Sessions can run side by side against different accounts and providers, and look the
 # same from inside. Claude Code keeps its own OAuth token and subscription variables out
@@ -345,7 +299,7 @@ fi
 # auth_login=1 means the session runs on the stored login — the only case where the
 # shared usage cache, fetched with that login, describes this session.
 auth_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;211m'; fi; }  # soft pink
-auth_t1=""; auth_t3=""; auth_login=0
+auth_t1=""; auth_t3=""; auth_login=0; acct_id=""
 
 if [ -n "${CS_AUTH_LABEL:-}" ]; then
   auth_t1="$CS_AUTH_LABEL"
@@ -366,20 +320,64 @@ else
     auth_t1="API key"
   else
     auth_login=1
-    # Same global config the account uuid above came from.
-    auth_cfg="$CS_CONFIG_JSON"
+    # The login is described in Claude Code's global config. Path resolution mirrors
+    # Claude Code's: a legacy .config.json inside the config dir wins, else .claude.json,
+    # which sits beside the config dir by default and inside it when CLAUDE_CONFIG_DIR is
+    # set. One read gives both the email shown here and the account uuid the usage
+    # numbers below are keyed to.
+    if [ -f "$CLAUDE_DIR/.config.json" ]; then
+      auth_cfg="$CLAUDE_DIR/.config.json"
+    elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+      auth_cfg="$CLAUDE_CONFIG_DIR/.claude.json"
+    else
+      auth_cfg="$HOME/.claude.json"
+    fi
     if [ -f "$auth_cfg" ]; then
       if [ "$HAS_JQ" -eq 1 ]; then
-        auth_t1=$(jq -r '.oauthAccount.emailAddress // empty' "$auth_cfg" 2>/dev/null)
+        auth_rows=$(jq -r '(.oauthAccount.accountUuid // ""), (.oauthAccount.emailAddress // "")' "$auth_cfg" 2>/dev/null)
       else
-        auth_t1=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("oauthAccount") or {}).get("emailAddress") or "")' "$auth_cfg" 2>/dev/null)
+        auth_rows=$(python3 -c 'import json,sys; a=(json.load(open(sys.argv[1])).get("oauthAccount") or {}); print(a.get("accountUuid") or ""); print(a.get("emailAddress") or "")' "$auth_cfg" 2>/dev/null)
       fi
+      { IFS= read -r acct_id; IFS= read -r auth_t1; } <<< "$auth_rows"
       auth_t3="${auth_t1%%@*}"
     fi
   fi
 fi
 [ -n "$auth_t3" ] || auth_t3="$auth_t1"
 if [ "${CS_AUTH_SEGMENT:-1}" = "0" ]; then auth_t1=""; auth_t3=""; fi
+
+# ---- which account is logged in, and since when ----
+# Every usage number below belongs to one account, and an account switcher (claude-swap
+# and friends) can replace it under a running session. Claude Code records the live one
+# in the oauthAccount section of its global config, which the switcher rewrites in the
+# same breath as the credential — so the uuid read above is the cheapest honest answer to
+# "whose limits am I looking at". Only a session on the stored login reads it: no other
+# session shows a number that depends on it.
+#
+# The switch itself has no event to hook, so the first such session to render after it
+# is the one that timestamps it, in a file every session reads. The very first run has
+# nothing to compare against and records the account without claiming a switch happened.
+# The time is kept twice: epoch seconds for the grace timer below, and UTC YYYYMMDDhhmmss,
+# which is what a transcript timestamp reduces to once its punctuation is stripped — so
+# the two compare as plain numbers, with no date parser to differ between GNU and BSD.
+ACCOUNT_STATE="$CLAUDE_DIR/account-state"
+acct_changed_at=0; acct_changed_utc=""
+if [ -n "$acct_id" ]; then
+  acct_prev_id=""; acct_prev_at=0; acct_prev_utc=""
+  if [ -f "$ACCOUNT_STATE" ]; then
+    IFS=$'\t' read -r acct_prev_id acct_prev_at acct_prev_utc < "$ACCOUNT_STATE"
+    [[ "$acct_prev_at" =~ ^[0-9]+$ ]] || acct_prev_at=0
+    [[ "$acct_prev_utc" =~ ^[0-9]{14}$ ]] || acct_prev_utc=""
+  fi
+  if [ "$acct_prev_id" = "$acct_id" ]; then
+    acct_changed_at="$acct_prev_at"; acct_changed_utc="$acct_prev_utc"
+  else
+    [ -n "$acct_prev_id" ] && read -r acct_changed_at acct_changed_utc <<< "$(date -u '+%s %Y%m%d%H%M%S')"
+    printf '%s\t%s\t%s\n' "$acct_id" "$acct_changed_at" "$acct_changed_utc" > "$ACCOUNT_STATE.$$" 2>/dev/null \
+      && mv -f "$ACCOUNT_STATE.$$" "$ACCOUNT_STATE" 2>/dev/null
+    rm -f "$ACCOUNT_STATE.$$" 2>/dev/null
+  fi
+fi
 
 if [ "$HAS_JQ" -eq 1 ]; then
   u5h=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty' 2>/dev/null)
@@ -405,20 +403,50 @@ nat_u5h="$u5h"; nat_r5h="$r5h"; nat_u7d="$u7d"; nat_r7d="$r7d"
 # rate_limits from the response headers of *this* session's API calls, so right after a
 # switch every open session is still quoting the account you left — a number that is not
 # merely stale but about somebody else's quota, and one that no amount of waiting fixes
-# in a session you do not type in again. The session's own transcript dates it: untouched
-# since the switch means it has not had a response since either. Sessions without a
+# in a session you do not type in again. The session's own transcript dates it: its last
+# reply predating the switch means it has not had a response since. Sessions without a
 # readable transcript fall back to a fixed grace window. Only a session on the stored
 # login is affected: one billing elsewhere never quoted that account in the first place.
 ACCOUNT_GRACE="${CS_ACCOUNT_GRACE:-900}"
 [[ "$ACCOUNT_GRACE" =~ ^[0-9]+$ ]] || ACCOUNT_GRACE=900
-nat_stale=0
+nat_stale=0; sess_reply=""
 if [ "$auth_login" -eq 1 ] && [ "$acct_changed_at" -gt 0 ]; then
-  sess_mtime=0
+  sess_mtime=0; sess_size=0
   if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-    sess_mtime=$(stat -c %Y "$transcript_path" 2>/dev/null || stat -f %m "$transcript_path" 2>/dev/null || echo 0)
+    read -r sess_mtime sess_size <<< "$(stat -c '%Y %s' "$transcript_path" 2>/dev/null || stat -f '%m %z' "$transcript_path" 2>/dev/null)"
+    [[ "$sess_mtime" =~ ^[0-9]+$ ]] || sess_mtime=0
+    [[ "$sess_size" =~ ^[0-9]+$ ]] || sess_size=0
   fi
   if [ "$sess_mtime" -gt 0 ]; then
-    [ "$sess_mtime" -lt "$acct_changed_at" ] && nat_stale=1
+    if [ "$sess_mtime" -lt "$acct_changed_at" ]; then
+      nat_stale=1             # nothing written since the switch, so nothing answered either
+    elif [ -n "$acct_changed_utc" ]; then
+      # Written since the switch is not answered since the switch: the prompt itself, slash
+      # commands, mode changes and an idle session's away summary all land in the
+      # transcript with no response behind them. The last assistant entry is what dates
+      # one. It sits near the end, so only the last 1MB or so is read, by dd, which seeks
+      # (BSD tail -c crawls there, ~30x slower). A tail taken up entirely by one huge tool
+      # result counts as no reply, which errs toward the cache.
+      sess_skip=$(( sess_size / 65536 - 16 )); [ "$sess_skip" -gt 0 ] || sess_skip=0
+      sess_reply=$(dd if="$transcript_path" bs=65536 skip="$sess_skip" 2>/dev/null | grep '"type":"assistant"' | tail -n 5 |
+        if [ "$HAS_JQ" -eq 1 ]; then
+          jq -Rr 'fromjson? | select(.type == "assistant") | .timestamp // empty' 2>/dev/null
+        else
+          python3 -c '
+import json, sys
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if d.get("type") == "assistant" and d.get("timestamp"):
+        print(d["timestamp"])
+' 2>/dev/null
+        fi | tail -n 1)
+      sess_reply_utc="${sess_reply:0:19}"; sess_reply_utc="${sess_reply_utc//[!0-9]/}"
+      [[ "$sess_reply_utc" =~ ^[0-9]{14}$ ]] || sess_reply_utc=0
+      [ "$sess_reply_utc" -lt "$acct_changed_utc" ] && nat_stale=1
+    fi
   elif [ $(( $(date +%s) - acct_changed_at )) -lt "$ACCOUNT_GRACE" ]; then
     nat_stale=1
   fi
@@ -664,7 +692,7 @@ if [ -n "$LOG_FILE" ]; then
 {
   echo "[$TIMESTAMP] Extracted: dir=${current_dir:-}, model=${model_name:-}, git=${git_branch:-}, ctx=${context_pct:-}, session=${rl_session_pct:-}%, weekly=${rl_weekly_pct:-}%"
   echo "[$TIMESTAMP] Usage cache: ${#mu_names[@]} model bucket(s)${mu_names[0]:+ (${mu_names[0]} ${mu_pcts[0]}%)} status=${mu_status:-none} age=${mu_age}s vs-native=s:${mu_s_state}/w:${mu_w_state} filled=s${rl_s_cached}/w${rl_w_cached} refresh=${mu_need}${mu_note:+ note=${mu_note}}"
-  echo "[$TIMESTAMP] Account: ${acct_id:-none} changed_at=${acct_changed_at} cache_account=${mu_account:-none} mismatch=${mu_acct_mismatch} native_dropped=${nat_stale}"
+  echo "[$TIMESTAMP] Account: ${acct_id:-none} changed_at=${acct_changed_at} last_reply=${sess_reply:-none} cache_account=${mu_account:-none} mismatch=${mu_acct_mismatch} native_dropped=${nat_stale}"
   echo "[$TIMESTAMP] Width: term_cols=${term_cols} (source=${term_cols_src}) max_rows=${sl_max_rows}"
 } >> "$LOG_FILE" 2>/dev/null
 fi
