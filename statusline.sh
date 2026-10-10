@@ -193,6 +193,7 @@ if [ "$HAS_JQ" -eq 1 ]; then
   model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"' 2>/dev/null)
   model_version=$(echo "$input" | jq -r '.model.version // ""' 2>/dev/null)
   session_id=$(echo "$input" | jq -r '.session_id // ""' 2>/dev/null)
+  transcript_path=$(echo "$input" | jq -r '.transcript_path // ""' 2>/dev/null)
   cc_version=$(echo "$input" | jq -r '.version // ""' 2>/dev/null)
   output_style=$(echo "$input" | jq -r '.output_style.name // ""' 2>/dev/null)
 else
@@ -215,6 +216,7 @@ else
   # Model version is in the model ID, not a separate field  
   model_version=""  # Not available in Claude Code JSON
   session_id=$(extract_json_string "$input" "session_id" "")
+  transcript_path=$(extract_json_string "$input" "transcript_path" "")
   # CC version is at the root level
   cc_version=$(echo "$input" | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
   # Output style is nested
@@ -280,6 +282,103 @@ rl_weekly_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;153m'; fi;
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
+# ---- auth source: who this session bills to ----
+# Sessions can run side by side against different accounts and providers, and look the
+# same from inside. Claude Code keeps its own OAuth token and subscription variables out
+# of the statusline's environment and puts no auth field on stdin, so the source comes
+# from the environment it does pass through, first match wins:
+#   1. CS_AUTH_LABEL                               -> the label (a named profile)
+#   2. CLAUDE_CODE_USE_BEDROCK / _VERTEX / _FOUNDRY -> the provider
+#   3. ANTHROPIC_BASE_URL other than api.anthropic.com -> its host
+#   4. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN    -> "API key"
+#   5. otherwise the claude.ai login stored in the config dir -> its email
+# A profile that swaps credentials through a variable Claude Code hides (a token from
+# `claude setup-token` in CLAUDE_CODE_OAUTH_TOKEN) is only visible through rule 1, so its
+# settings file should set CS_AUTH_LABEL; a settings file's env block reaches every
+# process that runs the session, background ones included.
+# auth_login=1 means the session runs on the stored login — the only case where the
+# shared usage cache, fetched with that login, describes this session.
+auth_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;211m'; fi; }  # soft pink
+auth_t1=""; auth_t3=""; auth_login=0; acct_id=""
+
+if [ -n "${CS_AUTH_LABEL:-}" ]; then
+  auth_t1="$CS_AUTH_LABEL"
+elif [ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]; then
+  auth_t1="Bedrock"
+elif [ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]; then
+  auth_t1="Vertex"
+elif [ -n "${CLAUDE_CODE_USE_FOUNDRY:-}" ]; then
+  auth_t1="Foundry"
+else
+  auth_host="${ANTHROPIC_BASE_URL:-}"; auth_host="${auth_host#*://}"
+  auth_host="${auth_host%%/*}"; auth_host="${auth_host%%:*}"
+  if [ -n "$auth_host" ] && [ "$auth_host" != "api.anthropic.com" ]; then
+    auth_t1="$auth_host"
+    # Terse form keeps the last two labels: api.eu.example.com -> example.com
+    auth_t3=$(printf '%s' "$auth_host" | awk -F. 'NF>2 && $NF !~ /^[0-9]+$/ {print $(NF-1)"."$NF; next} {print}')
+  elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    auth_t1="API key"
+  else
+    auth_login=1
+    # The login is described in Claude Code's global config. Path resolution mirrors
+    # Claude Code's: a legacy .config.json inside the config dir wins, else .claude.json,
+    # which sits beside the config dir by default and inside it when CLAUDE_CONFIG_DIR is
+    # set. One read gives both the email shown here and the account uuid the usage
+    # numbers below are keyed to.
+    if [ -f "$CLAUDE_DIR/.config.json" ]; then
+      auth_cfg="$CLAUDE_DIR/.config.json"
+    elif [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+      auth_cfg="$CLAUDE_CONFIG_DIR/.claude.json"
+    else
+      auth_cfg="$HOME/.claude.json"
+    fi
+    if [ -f "$auth_cfg" ]; then
+      if [ "$HAS_JQ" -eq 1 ]; then
+        auth_rows=$(jq -r '(.oauthAccount.accountUuid // ""), (.oauthAccount.emailAddress // "")' "$auth_cfg" 2>/dev/null)
+      else
+        auth_rows=$(python3 -c 'import json,sys; a=(json.load(open(sys.argv[1])).get("oauthAccount") or {}); print(a.get("accountUuid") or ""); print(a.get("emailAddress") or "")' "$auth_cfg" 2>/dev/null)
+      fi
+      { IFS= read -r acct_id; IFS= read -r auth_t1; } <<< "$auth_rows"
+      auth_t3="${auth_t1%%@*}"
+    fi
+  fi
+fi
+[ -n "$auth_t3" ] || auth_t3="$auth_t1"
+if [ "${CS_AUTH_SEGMENT:-1}" = "0" ]; then auth_t1=""; auth_t3=""; fi
+
+# ---- which account is logged in, and since when ----
+# Every usage number below belongs to one account, and an account switcher (claude-swap
+# and friends) can replace it under a running session. Claude Code records the live one
+# in the oauthAccount section of its global config, which the switcher rewrites in the
+# same breath as the credential — so the uuid read above is the cheapest honest answer to
+# "whose limits am I looking at". Only a session on the stored login reads it: no other
+# session shows a number that depends on it.
+#
+# The switch itself has no event to hook, so the first such session to render after it
+# is the one that timestamps it, in a file every session reads. The very first run has
+# nothing to compare against and records the account without claiming a switch happened.
+# The time is kept twice: epoch seconds for the grace timer below, and UTC YYYYMMDDhhmmss,
+# which is what a transcript timestamp reduces to once its punctuation is stripped — so
+# the two compare as plain numbers, with no date parser to differ between GNU and BSD.
+ACCOUNT_STATE="$CLAUDE_DIR/account-state"
+acct_changed_at=0; acct_changed_utc=""
+if [ -n "$acct_id" ]; then
+  acct_prev_id=""; acct_prev_at=0; acct_prev_utc=""
+  if [ -f "$ACCOUNT_STATE" ]; then
+    IFS=$'\t' read -r acct_prev_id acct_prev_at acct_prev_utc < "$ACCOUNT_STATE"
+    [[ "$acct_prev_at" =~ ^[0-9]+$ ]] || acct_prev_at=0
+    [[ "$acct_prev_utc" =~ ^[0-9]{14}$ ]] || acct_prev_utc=""
+  fi
+  if [ "$acct_prev_id" = "$acct_id" ]; then
+    acct_changed_at="$acct_prev_at"; acct_changed_utc="$acct_prev_utc"
+  else
+    [ -n "$acct_prev_id" ] && read -r acct_changed_at acct_changed_utc <<< "$(date -u '+%s %Y%m%d%H%M%S')"
+    printf '%s\t%s\t%s\n' "$acct_id" "$acct_changed_at" "$acct_changed_utc" > "$ACCOUNT_STATE.$$" 2>/dev/null \
+      && mv -f "$ACCOUNT_STATE.$$" "$ACCOUNT_STATE" 2>/dev/null
+    rm -f "$ACCOUNT_STATE.$$" 2>/dev/null
+  fi
+fi
+
 if [ "$HAS_JQ" -eq 1 ]; then
   u5h=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty' 2>/dev/null)
   r5h=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty' 2>/dev/null)
@@ -299,6 +398,63 @@ fi
 # They are a per-session snapshot: Claude Code only updates them after *this* session's
 # API responses, so a window you left idle keeps reporting whatever it was told last.
 nat_u5h="$u5h"; nat_r5h="$r5h"; nat_u7d="$u7d"; nat_r7d="$r7d"
+
+# ...and drop them wholesale if they predate an account switch. Claude Code refreshes
+# rate_limits from the response headers of *this* session's API calls, so right after a
+# switch every open session is still quoting the account you left — a number that is not
+# merely stale but about somebody else's quota, and one that no amount of waiting fixes
+# in a session you do not type in again. The session's own transcript dates it: its last
+# reply predating the switch means it has not had a response since. Sessions without a
+# readable transcript fall back to a fixed grace window. Only a session on the stored
+# login is affected: one billing elsewhere never quoted that account in the first place.
+ACCOUNT_GRACE="${CS_ACCOUNT_GRACE:-900}"
+[[ "$ACCOUNT_GRACE" =~ ^[0-9]+$ ]] || ACCOUNT_GRACE=900
+nat_stale=0; sess_reply=""
+if [ "$auth_login" -eq 1 ] && [ "$acct_changed_at" -gt 0 ]; then
+  sess_mtime=0; sess_size=0
+  if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    read -r sess_mtime sess_size <<< "$(stat -c '%Y %s' "$transcript_path" 2>/dev/null || stat -f '%m %z' "$transcript_path" 2>/dev/null)"
+    [[ "$sess_mtime" =~ ^[0-9]+$ ]] || sess_mtime=0
+    [[ "$sess_size" =~ ^[0-9]+$ ]] || sess_size=0
+  fi
+  if [ "$sess_mtime" -gt 0 ]; then
+    if [ "$sess_mtime" -lt "$acct_changed_at" ]; then
+      nat_stale=1             # nothing written since the switch, so nothing answered either
+    elif [ -n "$acct_changed_utc" ]; then
+      # Written since the switch is not answered since the switch: the prompt itself, slash
+      # commands, mode changes and an idle session's away summary all land in the
+      # transcript with no response behind them. The last assistant entry is what dates
+      # one. It sits near the end, so only the last 1MB or so is read, by dd, which seeks
+      # (BSD tail -c crawls there, ~30x slower). A tail taken up entirely by one huge tool
+      # result counts as no reply, which errs toward the cache.
+      sess_skip=$(( sess_size / 65536 - 16 )); [ "$sess_skip" -gt 0 ] || sess_skip=0
+      sess_reply=$(dd if="$transcript_path" bs=65536 skip="$sess_skip" 2>/dev/null | grep '"type":"assistant"' | tail -n 5 |
+        if [ "$HAS_JQ" -eq 1 ]; then
+          jq -Rr 'fromjson? | select(.type == "assistant") | .timestamp // empty' 2>/dev/null
+        else
+          python3 -c '
+import json, sys
+for line in sys.stdin:
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if d.get("type") == "assistant" and d.get("timestamp"):
+        print(d["timestamp"])
+' 2>/dev/null
+        fi | tail -n 1)
+      sess_reply_utc="${sess_reply:0:19}"; sess_reply_utc="${sess_reply_utc//[!0-9]/}"
+      [[ "$sess_reply_utc" =~ ^[0-9]{14}$ ]] || sess_reply_utc=0
+      [ "$sess_reply_utc" -lt "$acct_changed_utc" ] && nat_stale=1
+    fi
+  elif [ $(( $(date +%s) - acct_changed_at )) -lt "$ACCOUNT_GRACE" ]; then
+    nat_stale=1
+  fi
+fi
+if [ "$nat_stale" -eq 1 ]; then
+  u5h=""; r5h=""; u7d=""; r7d=""
+  nat_u5h=""; nat_r5h=""; nat_u7d=""; nat_r7d=""
+fi
 
 # Compare a native window against the cached one. Usage only grows inside a window, so a
 # higher percentage for the same resets_at is simply the newer reading — which is how one
@@ -320,60 +476,6 @@ win_state() { # native_pct native_reset cached_pct cached_reset -> ahead|behind|
   }'
 }
 
-# ---- auth source: who this session bills to ----
-# Sessions can run side by side against different accounts and providers, and look the
-# same from inside. Claude Code keeps its own OAuth token and subscription variables out
-# of the statusline's environment and puts no auth field on stdin, so the source comes
-# from the environment it does pass through, first match wins:
-#   1. CS_AUTH_LABEL                               -> the label (a named profile)
-#   2. CLAUDE_CODE_USE_BEDROCK / _VERTEX / _FOUNDRY -> the provider
-#   3. ANTHROPIC_BASE_URL other than api.anthropic.com -> its host
-#   4. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN    -> "API key"
-#   5. otherwise the claude.ai login stored in the config dir -> its email
-# A profile that swaps credentials through a variable Claude Code hides (a token from
-# `claude setup-token` in CLAUDE_CODE_OAUTH_TOKEN) is only visible through rule 1, so its
-# settings file should set CS_AUTH_LABEL; a settings file's env block reaches every
-# process that runs the session, background ones included.
-# auth_login=1 means the session runs on the stored login — the only case where the
-# shared usage cache, fetched with that login, describes this session.
-auth_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;211m'; fi; }  # soft pink
-auth_t1=""; auth_t3=""; auth_login=0
-
-if [ -n "${CS_AUTH_LABEL:-}" ]; then
-  auth_t1="$CS_AUTH_LABEL"
-elif [ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]; then
-  auth_t1="Bedrock"
-elif [ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]; then
-  auth_t1="Vertex"
-elif [ -n "${CLAUDE_CODE_USE_FOUNDRY:-}" ]; then
-  auth_t1="Foundry"
-else
-  auth_host="${ANTHROPIC_BASE_URL:-}"; auth_host="${auth_host#*://}"
-  auth_host="${auth_host%%/*}"; auth_host="${auth_host%%:*}"
-  if [ -n "$auth_host" ] && [ "$auth_host" != "api.anthropic.com" ]; then
-    auth_t1="$auth_host"
-    # Terse form keeps the last two labels: api.eu.example.com -> example.com
-    auth_t3=$(printf '%s' "$auth_host" | awk -F. 'NF>2 && $NF !~ /^[0-9]+$/ {print $(NF-1)"."$NF; next} {print}')
-  elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-    auth_t1="API key"
-  else
-    auth_login=1
-    # The global config lives beside the config dir by default, inside it when
-    # CLAUDE_CONFIG_DIR is set.
-    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then auth_cfg="$CLAUDE_CONFIG_DIR/.claude.json"; else auth_cfg="$HOME/.claude.json"; fi
-    if [ -f "$auth_cfg" ]; then
-      if [ "$HAS_JQ" -eq 1 ]; then
-        auth_t1=$(jq -r '.oauthAccount.emailAddress // empty' "$auth_cfg" 2>/dev/null)
-      else
-        auth_t1=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("oauthAccount") or {}).get("emailAddress") or "")' "$auth_cfg" 2>/dev/null)
-      fi
-      auth_t3="${auth_t1%%@*}"
-    fi
-  fi
-fi
-[ -n "$auth_t3" ] || auth_t3="$auth_t1"
-if [ "${CS_AUTH_SEGMENT:-1}" = "0" ]; then auth_t1=""; auth_t3=""; fi
-
 # ---- usage-probe cache ----
 # Holds the per-model weekly bucket (Fable, Opus, ...), which is not on the statusline
 # stdin at all, plus copies of the session and all-model weekly windows. usage-probe.sh
@@ -384,6 +486,7 @@ MODEL_USAGE_MIN_INTERVAL="${CS_USAGE_MIN_INTERVAL:-180}"    # floor between refr
 MODEL_USAGE_ERROR_BACKOFF="${CS_USAGE_ERROR_BACKOFF:-900}"  # slower retry after a failure
 mu_names=(); mu_pcts=(); mu_resets=()
 mu_note=""; mu_status=""; mu_age=-1; mu_need=0; mu_fresh=0
+mu_account=""; mu_acct_mismatch=0; mu_unstamped=0
 mu_s_pct=""; mu_s_reset=""; mu_w_pct=""; mu_w_reset=""
 
 if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ "$auth_login" -eq 1 ] && [ -f "$MODEL_USAGE_CACHE" ]; then
@@ -393,7 +496,8 @@ if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ "$auth_login" -eq 1 ] && [ -f "$MODEL_
   # One TSV record per line: "#" the cache's own state, "s"/"w" the session and
   # all-model weekly windows, "m" a per-model bucket.
   if [ "$HAS_JQ" -eq 1 ]; then
-    mu_rows=$(jq -r '["#", (.status // ""), (.errorMsg // "")],
+    mu_rows=$(jq -r '["a", (.account // ""), ""],
+                     ["#", (.status // ""), (.errorMsg // "")],
                      ["s", (.session.percent // ""), (.session.resetsAt // "")],
                      ["w", (.weeklyAll.percent // ""), (.weeklyAll.resetsAt // "")],
                      ((.models // [])[] | ["m", .name, (.percent // 0), (.resetsAt // 0)])
@@ -405,6 +509,7 @@ try:
     d = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
+print("a\t%s\t" % (d.get("account") or ""))
 print("#\t%s\t%s" % (d.get("status") or "", d.get("errorMsg") or ""))
 for key, tag in (("session", "s"), ("weeklyAll", "w")):
     win = d.get(key) or {}
@@ -415,6 +520,18 @@ for m in d.get("models") or []:
   fi
   while IFS=$'\t' read -r mu_k mu_a mu_b mu_c; do
     case "$mu_k" in
+      a)
+        # Numbers read for the account you just left are not stale, they are wrong:
+        # no age makes them true again, so the whole cache goes, freshness included.
+        mu_account="$mu_a"
+        if [ -n "$acct_id" ]; then
+          if [ -z "$mu_account" ]; then
+            mu_unstamped=1        # written before this cache carried an account
+          elif [ "$mu_account" != "$acct_id" ]; then
+            mu_acct_mismatch=1; mu_fresh=0
+          fi
+        fi
+        ;;
       '#')
         mu_status="$mu_a"
         [ "$mu_status" = "ok" ] || mu_note="${mu_b:-$mu_status}"
@@ -430,7 +547,11 @@ for m in d.get("models") or []:
         ;;
     esac
   done <<< "$mu_rows"
-  [ "$mu_fresh" -eq 1 ] || mu_note="cache stale (${mu_age}s old)"
+  if [ "$mu_acct_mismatch" -eq 1 ]; then
+    mu_note="cache belongs to another account"
+  elif [ "$mu_fresh" -ne 1 ]; then
+    mu_note="cache stale (${mu_age}s old)"
+  fi
 fi
 
 # Two cases where the shared cache beats what this session was told:
@@ -538,8 +659,15 @@ if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ "$auth_login" -eq 1 ]; then
   if [ "$mu_fresh" -eq 1 ] && [ -z "$mu_s_pct" ] && [ -n "$nat_u5h" ] && [ "$nat_u5h" != "null" ]; then
     mu_behind=1
   fi
+  # A cache from before this file carried an account: usable, but worth re-stamping so
+  # the next switch is caught. Left on the ordinary floor — nothing is wrong with it.
+  [ "$mu_unstamped" -eq 1 ] && mu_behind=1
 
   if [ ! -f "$MODEL_USAGE_CACHE" ]; then
+    mu_need=1
+  elif [ "$mu_acct_mismatch" -eq 1 ]; then
+    # The one case worth spending a request on immediately: every segment is either
+    # blank or about the previous account until this lands.
     mu_need=1
   elif [ "$mu_status" != "ok" ]; then
     [ "$mu_age" -ge "$MODEL_USAGE_ERROR_BACKOFF" ] && mu_need=1
@@ -564,6 +692,7 @@ if [ -n "$LOG_FILE" ]; then
 {
   echo "[$TIMESTAMP] Extracted: dir=${current_dir:-}, model=${model_name:-}, git=${git_branch:-}, ctx=${context_pct:-}, session=${rl_session_pct:-}%, weekly=${rl_weekly_pct:-}%"
   echo "[$TIMESTAMP] Usage cache: ${#mu_names[@]} model bucket(s)${mu_names[0]:+ (${mu_names[0]} ${mu_pcts[0]}%)} status=${mu_status:-none} age=${mu_age}s vs-native=s:${mu_s_state}/w:${mu_w_state} filled=s${rl_s_cached}/w${rl_w_cached} refresh=${mu_need}${mu_note:+ note=${mu_note}}"
+  echo "[$TIMESTAMP] Account: ${acct_id:-none} changed_at=${acct_changed_at} last_reply=${sess_reply:-none} cache_account=${mu_account:-none} mismatch=${mu_acct_mismatch} native_dropped=${nat_stale}"
   echo "[$TIMESTAMP] Width: term_cols=${term_cols} (source=${term_cols_src}) max_rows=${sl_max_rows}"
 } >> "$LOG_FILE" 2>/dev/null
 fi
