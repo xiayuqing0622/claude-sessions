@@ -12,6 +12,25 @@ if command -v jq >/dev/null 2>&1; then
   HAS_JQ=1
 fi
 
+# ---- context state ----
+# Leave this session's context size where `cs ctx wait` can read it. ctx-state.sh sits next
+# to the *real* script: `cs install` symlinks this file into $CLAUDE_DIR, where the script's
+# own directory alone would miss it. It prints nothing and cannot affect the rendering below.
+sl_self="${BASH_SOURCE[0]}"
+for _hop in 1 2 3 4 5; do
+  [ -L "$sl_self" ] || break
+  _link=$(readlink "$sl_self")
+  case "$_link" in
+    /*) sl_self="$_link" ;;
+    *)  case "$sl_self" in */*) sl_self="${sl_self%/*}/$_link" ;; *) sl_self="$_link" ;; esac ;;
+  esac
+done
+case "$sl_self" in */*) sl_real_dir="${sl_self%/*}" ;; *) sl_real_dir="." ;; esac
+unset _hop _link
+if [ "$HAS_JQ" -eq 1 ] && [ -x "$sl_real_dir/ctx-state.sh" ]; then
+  "$sl_real_dir/ctx-state.sh" main <<< "$input" >/dev/null 2>&1 || true
+fi
+
 # ---- terminal width detection ----
 # Claude Code clips each row of statusline output to the terminal width, so we adapt
 # line 2 verbosity to avoid the bottom row being hidden on narrow terminals.
@@ -148,7 +167,7 @@ extract_json_string() {
   field="${field%% *}"  # Remove any jq operators
   
   # Try to extract string value (quoted)
-  local value=$(echo "$json" | grep -o "\"\${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/')
+  local value=$(echo "$json" | grep -o "\"${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed 's/.*:[[:space:]]*"\([^"]*\)".*/\1/')
   
   # Convert escaped backslashes to forward slashes for Windows paths
   if [ -n "$value" ]; then
@@ -157,7 +176,7 @@ extract_json_string() {
   
   # If no string value found, try to extract number value (unquoted)
   if [ -z "$value" ] || [ "$value" = "null" ]; then
-    value=$(echo "$json" | grep -o "\"\${field}\"[[:space:]]*:[[:space:]]*[0-9.]\+" | head -1 | sed 's/.*:[[:space:]]*\([0-9.]\+\).*/\1/')
+    value=$(echo "$json" | grep -o "\"${field}\"[[:space:]]*:[[:space:]]*[0-9.]\+" | head -1 | sed 's/.*:[[:space:]]*\([0-9.]\+\).*/\1/')
   fi
   
   # Return value or default
@@ -309,6 +328,59 @@ if [ -n "$acct_id" ]; then
   fi
 fi
 
+# ---- auth source: who this session bills to ----
+# Sessions can run side by side against different accounts and providers, and look the
+# same from inside. Claude Code keeps its own OAuth token and subscription variables out
+# of the statusline's environment and puts no auth field on stdin, so the source comes
+# from the environment it does pass through, first match wins:
+#   1. CS_AUTH_LABEL                               -> the label (a named profile)
+#   2. CLAUDE_CODE_USE_BEDROCK / _VERTEX / _FOUNDRY -> the provider
+#   3. ANTHROPIC_BASE_URL other than api.anthropic.com -> its host
+#   4. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN    -> "API key"
+#   5. otherwise the claude.ai login stored in the config dir -> its email
+# A profile that swaps credentials through a variable Claude Code hides (a token from
+# `claude setup-token` in CLAUDE_CODE_OAUTH_TOKEN) is only visible through rule 1, so its
+# settings file should set CS_AUTH_LABEL; a settings file's env block reaches every
+# process that runs the session, background ones included.
+# auth_login=1 means the session runs on the stored login — the only case where the
+# shared usage cache, fetched with that login, describes this session.
+auth_color() { if [ "$use_color" -eq 1 ]; then printf '\033[38;5;211m'; fi; }  # soft pink
+auth_t1=""; auth_t3=""; auth_login=0
+
+if [ -n "${CS_AUTH_LABEL:-}" ]; then
+  auth_t1="$CS_AUTH_LABEL"
+elif [ -n "${CLAUDE_CODE_USE_BEDROCK:-}" ]; then
+  auth_t1="Bedrock"
+elif [ -n "${CLAUDE_CODE_USE_VERTEX:-}" ]; then
+  auth_t1="Vertex"
+elif [ -n "${CLAUDE_CODE_USE_FOUNDRY:-}" ]; then
+  auth_t1="Foundry"
+else
+  auth_host="${ANTHROPIC_BASE_URL:-}"; auth_host="${auth_host#*://}"
+  auth_host="${auth_host%%/*}"; auth_host="${auth_host%%:*}"
+  if [ -n "$auth_host" ] && [ "$auth_host" != "api.anthropic.com" ]; then
+    auth_t1="$auth_host"
+    # Terse form keeps the last two labels: api.eu.example.com -> example.com
+    auth_t3=$(printf '%s' "$auth_host" | awk -F. 'NF>2 && $NF !~ /^[0-9]+$/ {print $(NF-1)"."$NF; next} {print}')
+  elif [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+    auth_t1="API key"
+  else
+    auth_login=1
+    # Same global config the account uuid above came from.
+    auth_cfg="$CS_CONFIG_JSON"
+    if [ -f "$auth_cfg" ]; then
+      if [ "$HAS_JQ" -eq 1 ]; then
+        auth_t1=$(jq -r '.oauthAccount.emailAddress // empty' "$auth_cfg" 2>/dev/null)
+      else
+        auth_t1=$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("oauthAccount") or {}).get("emailAddress") or "")' "$auth_cfg" 2>/dev/null)
+      fi
+      auth_t3="${auth_t1%%@*}"
+    fi
+  fi
+fi
+[ -n "$auth_t3" ] || auth_t3="$auth_t1"
+if [ "${CS_AUTH_SEGMENT:-1}" = "0" ]; then auth_t1=""; auth_t3=""; fi
+
 if [ "$HAS_JQ" -eq 1 ]; then
   u5h=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty' 2>/dev/null)
   r5h=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty' 2>/dev/null)
@@ -335,11 +407,12 @@ nat_u5h="$u5h"; nat_r5h="$r5h"; nat_u7d="$u7d"; nat_r7d="$r7d"
 # merely stale but about somebody else's quota, and one that no amount of waiting fixes
 # in a session you do not type in again. The session's own transcript dates it: untouched
 # since the switch means it has not had a response since either. Sessions without a
-# readable transcript fall back to a fixed grace window.
+# readable transcript fall back to a fixed grace window. Only a session on the stored
+# login is affected: one billing elsewhere never quoted that account in the first place.
 ACCOUNT_GRACE="${CS_ACCOUNT_GRACE:-900}"
 [[ "$ACCOUNT_GRACE" =~ ^[0-9]+$ ]] || ACCOUNT_GRACE=900
 nat_stale=0
-if [ "$acct_changed_at" -gt 0 ]; then
+if [ "$auth_login" -eq 1 ] && [ "$acct_changed_at" -gt 0 ]; then
   sess_mtime=0
   if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
     sess_mtime=$(stat -c %Y "$transcript_path" 2>/dev/null || stat -f %m "$transcript_path" 2>/dev/null || echo 0)
@@ -388,7 +461,7 @@ mu_note=""; mu_status=""; mu_age=-1; mu_need=0; mu_fresh=0
 mu_account=""; mu_acct_mismatch=0; mu_unstamped=0
 mu_s_pct=""; mu_s_reset=""; mu_w_pct=""; mu_w_reset=""
 
-if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ -f "$MODEL_USAGE_CACHE" ]; then
+if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ "$auth_login" -eq 1 ] && [ -f "$MODEL_USAGE_CACHE" ]; then
   mu_mtime=$(stat -c %Y "$MODEL_USAGE_CACHE" 2>/dev/null || stat -f %m "$MODEL_USAGE_CACHE" 2>/dev/null || echo 0)
   mu_age=$(( $(date +%s) - mu_mtime ))
   [ "$mu_age" -lt "$MODEL_USAGE_MAX_AGE" ] && mu_fresh=1
@@ -549,7 +622,9 @@ fi
 # too. A session left idle compares equal and asks for nothing, however often it renders
 # — the work of refreshing falls on whichever session is actually consuming usage. The
 # staleness rule is the backstop for when every session is idle.
-if [ "${CS_MODEL_USAGE:-1}" != "0" ]; then
+# Only a session on the stored login may ask: the probe reads that login's token, and
+# its numbers describe that account, not whatever this session bills to.
+if [ "${CS_MODEL_USAGE:-1}" != "0" ] && [ "$auth_login" -eq 1 ]; then
   mu_behind=0
   { [ "$mu_s_state" = "behind" ] || [ "$mu_w_state" = "behind" ]; } && mu_behind=1
   # Native windows with nothing cached to compare them to: the cache needs those numbers.
@@ -575,18 +650,8 @@ if [ "${CS_MODEL_USAGE:-1}" != "0" ]; then
   fi
 
   if [ "$mu_need" -eq 1 ]; then
-    # Find usage-probe.sh next to the *real* script: `cs install` symlinks this file
-    # into $CLAUDE_DIR, where SCRIPT_DIR alone would miss the probe.
-    sl_self="${BASH_SOURCE[0]}"
-    for _hop in 1 2 3 4 5; do
-      [ -L "$sl_self" ] || break
-      _link=$(readlink "$sl_self")
-      case "$_link" in
-        /*) sl_self="$_link" ;;
-        *)  sl_self="$(dirname "$sl_self")/$_link" ;;
-      esac
-    done
-    probe="$(cd "$(dirname "$sl_self")" 2>/dev/null && pwd)/usage-probe.sh"
+    # Find usage-probe.sh next to the *real* script (see "context state" above).
+    probe="$sl_real_dir/usage-probe.sh"
     [ -x "$probe" ] || probe="$SCRIPT_DIR/usage-probe.sh"
     # Detach every fd: a background child still holding our stdout would keep Claude
     # Code waiting on the pipe before it can draw the statusline.
@@ -641,6 +706,7 @@ add_seg 1 "📁" dir_color "$current_dir" "$current_dir" "$current_dir"
 # The " (1M context)" suffix is worth abbreviating, not dropping.
 model_terse="${model_name/ (1M context)/ (1M)}"
 add_seg 1 "🤖" model_color "$model_name" "$model_name" "$model_terse"
+[ -n "$auth_t1" ] && add_seg 1 "🔑" auth_color "$auth_t1" "$auth_t1" "$auth_t3"
 if [ -n "$model_version" ] && [ "$model_version" != "null" ]; then
   add_seg 1 "🏷️" version_color "$model_version" "$model_version" "$model_version"
 fi

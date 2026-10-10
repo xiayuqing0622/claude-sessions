@@ -2,12 +2,14 @@
 """cs - Claude Sessions Manager
 Track and label your parallel Claude Code sessions.
 """
+import argparse
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+from fractions import Fraction
 from pathlib import Path
 
 def _claude_dir():
@@ -20,6 +22,7 @@ CLAUDE_DIR = _claude_dir()
 LABELS_FILE = CLAUDE_DIR / "session-labels.json"
 HISTORY_FILE = CLAUDE_DIR / "history.jsonl"
 INSTALL_META = CLAUDE_DIR / "cs-install.json"
+CTX_DIR = CLAUDE_DIR / "cs-ctx"
 MY_UID = os.getuid()
 MY_USER = os.environ.get("USER", "")
 
@@ -549,6 +552,13 @@ def cmd_install(target_dir=None):
         _symlink_or_copy(probe_src, probe_dst)
         installed_files["usage-probe.sh"] = str(probe_dst)
 
+    # Likewise the statusline hands each render's context size to ctx-state.sh.
+    ctx_src = script_dir / "ctx-state.sh"
+    if ctx_src.exists():
+        ctx_dst = claude_dir / "ctx-state.sh"
+        _symlink_or_copy(ctx_src, ctx_dst)
+        installed_files["ctx-state.sh"] = str(ctx_dst)
+
     # Clean up the retired ratelimit-probe.sh (superseded by native rate_limits in
     # the statusline stdin). Remove any stale symlink/copy and its cache from prior installs.
     for stale in (claude_dir / "ratelimit-probe.sh", claude_dir / "ratelimit-cache.json"):
@@ -656,6 +666,169 @@ def cmd_install(target_dir=None):
         print(f"\n{GREEN}Install complete! All set.{NC}")
 
 
+CTX_WAIT_HELP = """\
+Wait until a context holder's context size reaches a threshold, then print one line and exit.
+
+A holder is the session itself (main) or one of its subagents. statusline.sh and
+subagent-statusline.sh record each holder's latest context size in
+$CLAUDE_CONFIG_DIR/cs-ctx/<session id>/<holder>.json (default ~/.claude); this command only
+reads those files. Nothing is printed while waiting.
+
+Usage:
+  cs ctx wait --at <percent> [--target <main|subagent id|subagent name>]
+              [--session <session id>] [--interval <seconds>] [--no-data-after <seconds>]
+
+Options:
+  --at <percent>           Threshold, a number above 0. The holder has reached it when
+                           tokenCount * 100 >= percent * contextWindowSize (no rounding).
+  --target <t>             main (default) is the session itself. Anything else is matched
+                           first against subagent ids, then against subagent names.
+  --session <session id>   Session to watch. Default: $CLAUDE_CODE_SESSION_ID.
+  --interval <seconds>     How often the local file is read. Default: {interval}.
+  --no-data-after <seconds>
+                           A target whose file is missing, or was last updated longer ago
+                           than this, counts as having no data. Default: {no_data}. A subagent
+                           that has just started has no file yet; it is waited for this long.
+
+Output (exactly one line, after which the command exits):
+  REACHED <pct>% tokenCount=<n> contextWindowSize=<w> target=<name>
+      The threshold is reached. When it is reached and the holder has completed at the
+      same read, REACHED wins. Exit code 0.
+  COMPLETED target=<name> <pct>%
+      The subagent has completed below the threshold. Exit code 0.
+  NO-DATA target=<name> reason=<why>
+      The file is missing or stale. Exit code 2.
+  AMBIGUOUS target=<name> ids=<id>,<id>,...
+      Several subagents carry that name; pass one of the ids instead. Exit code 2.
+
+Exit codes:
+  0  REACHED or COMPLETED
+  2  NO-DATA or AMBIGUOUS
+  1  Usage error (missing --at, no session id from --session or the environment, ...)
+"""
+
+CTX_WAIT_INTERVAL = 5
+CTX_WAIT_NO_DATA_AFTER = 300
+
+
+def _ctx_usage_error(msg):
+    print(f"cs ctx wait: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+class _CtxArgParser(argparse.ArgumentParser):
+    def error(self, message):
+        # argparse exits with 2 by default, which this command uses for NO-DATA.
+        _ctx_usage_error(message)
+
+
+def _ctx_read_state(path):
+    """Return the state dict of one holder file, or None when it is absent or unreadable."""
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    n, w = d.get("tokenCount"), d.get("contextWindowSize")
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (n, w)) or w <= 0:
+        return None
+    return d
+
+
+def _ctx_resolve_target(session_dir, target):
+    """Return (path, ambiguous_ids). path is None when no file carries the target yet."""
+    if target == "main":
+        return session_dir / "main.json", []
+    by_id = session_dir / f"{target}.json"
+    if by_id.is_file():
+        return by_id, []
+    matches = []
+    if session_dir.is_dir():
+        for f in sorted(session_dir.glob("*.json")):
+            d = _ctx_read_state(f)
+            if d is not None and d.get("name") == target:
+                matches.append(f)
+    if len(matches) > 1:
+        return None, [f.stem for f in matches]
+    return (matches[0] if matches else None), []
+
+
+def cmd_ctx_wait(argv):
+    parser = _CtxArgParser(prog="cs ctx wait", add_help=False)
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("--at")
+    parser.add_argument("--target", default="main")
+    parser.add_argument("--session")
+    parser.add_argument("--interval", type=float, default=CTX_WAIT_INTERVAL)
+    parser.add_argument("--no-data-after", type=float, default=CTX_WAIT_NO_DATA_AFTER)
+    args = parser.parse_args(argv)
+    if args.help:
+        print(CTX_WAIT_HELP.format(interval=CTX_WAIT_INTERVAL, no_data=CTX_WAIT_NO_DATA_AFTER), end="")
+        return
+    if args.at is None:
+        _ctx_usage_error("--at <percent> is required (see: cs ctx wait --help)")
+    try:
+        threshold = Fraction(args.at)
+    except (ValueError, ZeroDivisionError):
+        _ctx_usage_error(f"--at must be a number, got {args.at!r}")
+    if threshold <= 0:
+        _ctx_usage_error("--at must be above 0")
+    if args.interval <= 0 or args.no_data_after <= 0:
+        _ctx_usage_error("--interval and --no-data-after must be above 0")
+    session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if not session:
+        _ctx_usage_error("no session id: pass --session or set CLAUDE_CODE_SESSION_ID")
+    if "/" in session or session in (".", ".."):
+        _ctx_usage_error(f"invalid session id {session!r}")
+
+    session_dir = CTX_DIR / session
+    target = args.target
+    started = time.time()
+    while True:
+        path, ambiguous = _ctx_resolve_target(session_dir, target)
+        if ambiguous:
+            print(f"AMBIGUOUS target={target} ids={','.join(ambiguous)}")
+            sys.exit(2)
+        state = None
+        if path is not None:
+            try:
+                age = time.time() - path.stat().st_mtime
+            except OSError:
+                age = None
+            state = _ctx_read_state(path)
+        else:
+            age = None
+        if state is not None:
+            n, w = state["tokenCount"], state["contextWindowSize"]
+            pct = float(Fraction(n) * 100 / Fraction(w))
+            name = state.get("name") or (path.stem if target != "main" else "main")
+            if Fraction(n) * 100 >= threshold * Fraction(w):
+                print(f"REACHED {pct:.1f}% tokenCount={n} contextWindowSize={w} target={name}")
+                return
+            if state.get("status") == "completed":
+                print(f"COMPLETED target={name} {pct:.1f}%")
+                return
+        if age is not None and age > args.no_data_after:
+            print(f"NO-DATA target={target} reason=file not updated for {int(age)}s "
+                  f"(limit {args.no_data_after:g}s)")
+            sys.exit(2)
+        if age is None and time.time() - started > args.no_data_after:
+            print(f"NO-DATA target={target} reason=no file for this target after "
+                  f"{args.no_data_after:g}s in {session_dir}")
+            sys.exit(2)
+        time.sleep(args.interval)
+
+
+def cmd_ctx(argv):
+    if argv and argv[0] == "wait":
+        cmd_ctx_wait(argv[1:])
+    elif not argv or argv[0] in ("-h", "--help"):
+        print("Usage: cs ctx wait --at <percent> [options]    (see: cs ctx wait --help)")
+    else:
+        _ctx_usage_error(f"unknown subcommand {argv[0]!r}; try: cs ctx wait --help")
+
+
 def cmd_help():
     print("""cs - Claude Sessions Manager
 
@@ -665,6 +838,8 @@ Usage:
   cs label <id> <text>  Label a session (id = PID or pts number)
   cs unlabel <id>       Remove a session label
   cs clean              Remove labels for dead sessions
+  cs ctx wait --at <percent>
+                        Block until a context size reaches the threshold (see --help)
   cs install [dir]      One-click install (default: ~/bin)
   cs help               Show this help
 
@@ -683,7 +858,7 @@ When no manual label is set, cs auto-detects the task from history.""")
 
 def main():
     args = sys.argv[1:]
-    if not args or args[0] not in ("install", "help", "-h", "--help", "h"):
+    if not args or args[0] not in ("install", "help", "-h", "--help", "h", "ctx"):
         check_upgrade()
     if not args:
         cmd_list()
@@ -701,6 +876,8 @@ def main():
         cmd_unlabel(args[1])
     elif args[0] == "clean":
         cmd_clean()
+    elif args[0] == "ctx":
+        cmd_ctx(args[1:])
     elif args[0] == "install":
         cmd_install(args[1] if len(args) > 1 else None)
     elif args[0] in ("help", "-h", "--help", "h"):

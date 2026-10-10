@@ -41,11 +41,11 @@ cs clean                            # remove labels for dead sessions
 A custom Claude Code statusline showing everything at a glance:
 
 ```
-🏷️ fix auth module  📁 workspace/my-project  🌿 feat/auth  🤖 Opus 5  📟 v2.1.274  🎨 concise
+🏷️ fix auth module  📁 workspace/my-project  🌿 feat/auth  🤖 Opus 5  🔑 you@example.com  📟 v2.1.274  🎨 concise
 🧠 Ctx: 56% [=====-----]  ⚡ Session: 40% used, resets in 2h 31m [====------]  📊 Weekly(all): 57% used, resets in 1d 13h [=====-----]  🎭 Fable: 5% used [----------]
 ```
 
-**Identity group** — Session label, working directory, git branch, model, Claude Code version, output style
+**Identity group** — Session label, working directory, git branch, model, [auth source](#auth-source), Claude Code version, output style
 
 **Usage group** — Context window remaining, session (5h) usage limit, weekly (7d) usage limit for **all models**, and the weekly limit for the **model-scoped bucket** (e.g. Fable) when your plan has one
 
@@ -69,7 +69,7 @@ extra rows; nothing is ever dropped or clipped.
 ```
 # 70 columns — same segments, terser, wrapped
 🏷️ fix auth module  📁 workspace/my-project  🌿 feat/auth
-🤖 Opus 5 (1M)  📟 v2.1.274  🎨 concise
+🤖 Opus 5 (1M)  🔑 you  📟 v2.1.274  🎨 concise
 🧠 Ctx: 56%  ⚡ S: 40% 2h31m  📊 W(all): 57% 1d13h  🎭 Fable: 5%
 ```
 
@@ -82,7 +82,134 @@ reading the controlling pts device of an ancestor process → `100` fallback.
 
 The weekly segment is labelled `Weekly` when it is the only weekly number, and `Weekly(all)` once a per-model bucket sits next to it.
 
-### 3. Usage Limit Monitoring
+#### Auth source
+
+When you run sessions against more than one account or provider side by side — a claude.ai
+login, a `claude --settings <file>` whose `env` block carries a token or a third-party
+endpoint, a `CLAUDE_CONFIG_DIR` profile — they look identical from inside a session. The
+`🔑` segment says which one this session uses. Claude Code keeps its own OAuth token and
+subscription variables out of the statusline's environment and puts no auth field on stdin,
+so the segment reads the environment it does pass through; the first match wins:
+
+| # | Source | Shows |
+|---|--------|-------|
+| 1 | `CS_AUTH_LABEL` | that label |
+| 2 | `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` | `Bedrock` / `Vertex` / `Foundry` |
+| 3 | `ANTHROPIC_BASE_URL` other than `api.anthropic.com` | its host (terse tier: last two labels) |
+| 4 | `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` | `API key` |
+| 5 | Otherwise — the claude.ai login stored in the config dir | its email (terse tier: the part before `@`) |
+
+Give each launch profile a name by setting `CS_AUTH_LABEL` in its settings file:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_OAUTH_TOKEN": "…",
+    "CS_AUTH_LABEL": "work"
+  }
+}
+```
+
+`claude --settings work.json` then shows `🔑 work`. A settings file's `env` block is loaded
+into every process that runs the session — including a background session that agent view
+hands to a pre-started process — so the label holds wherever the session runs. For a profile
+that swaps credentials through a variable Claude Code hides from the statusline (a
+`claude setup-token` token in `CLAUDE_CODE_OAUTH_TOKEN`), the label is the only way to tell;
+without it such a session shows the stored login's email. The email is whatever the config
+dir currently holds, so it follows an account switcher that rewrites the login.
+`CS_AUTH_SEGMENT=0` hides the segment.
+
+Sessions matched by rules 1–4 do not bill to the stored login, so the usage cache — read
+with that login — says nothing about them: they show only the Session/Weekly numbers Claude
+Code reports natively (none for third-party endpoints), no `~` cached values and no per-model
+bucket, and they never start the probe. Leave `CS_AUTH_LABEL` unset for the stored login
+itself.
+
+#### Agent panel: model per subagent
+
+The statusline always follows the **lead** session: `/model` and the `🤖` segment show the
+lead's model, and stay put when you look at a subagent in the agent panel (the one below
+the prompt). A subagent's model is fixed when it spawns — and can differ from the lead's, e.g.
+via `CLAUDE_CODE_SUBAGENT_MODEL` — so the main statusline has nothing to show for it.
+
+`subagent-statusline.sh` fills that gap through Claude Code's `subagentStatusLine`
+setting, which styles each row of the agent panel. Every subagent row gets the model the
+agent **actually runs on** (the resolved ID, e.g. `sonnet-5-5`, `glm-5.3-flash`), plus effort,
+token count and context %:
+
+```
+builder · sonnet-5-5 · high · 29k (14%) · Implement the retry logic
+```
+
+Models are colored by family (opus / sonnet / haiku / fable); anything else — GLM, Kimi, a
+custom gateway model — is yellow, so a subagent that ended up on an unexpected model stands
+out. The setup step registers it next to `statusLine`:
+
+```json
+"subagentStatusLine": { "type": "command", "command": "…/subagent-statusline.sh" }
+```
+
+**Agent teams are not covered.** With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, a subagent
+Claude gives a `name` launches as a *teammate*, and teammate rows are never sent to this
+script — they keep the default `name · description · tokens` row. With teams off
+(`=0`) a named subagent is an ordinary one: it shows up here with its model and can still be
+messaged by name.
+
+Unlike `statusLine`, the installer leaves `subagentStatusLine` alone if you already point it
+at your own script. It needs `jq` and **needs Claude Code v2.1.205+** (earlier versions do
+not send the per-row `model`); without either, rows keep their default rendering.
+`CS_SUBAGENT_DEBUG=1` appends the raw stdin to `subagent-statusline-input.jsonl` in your
+Claude config dir — useful to see exactly which rows and fields Claude Code sends.
+
+### 3. Context State and `cs ctx wait`
+
+Claude Code hands the statusline the current context size of the session and of every subagent on each refresh. `statusline.sh` and `subagent-statusline.sh` also leave it in a small file, so other programs — a lead session waiting on a builder, for instance — can read it without polling Claude Code. `ctx-state.sh` is the one script that writes these files; both statuslines call it.
+
+**State files.** One JSON file per context holder, where a holder is the session itself or one of its subagents:
+
+```
+$CLAUDE_CONFIG_DIR/cs-ctx/<session_id>/<holder>.json      # default ~/.claude
+{"name": "builder", "status": "running", "tokenCount": 28607, "contextWindowSize": 200000}
+```
+
+- `<holder>` is `main` for the session itself and the subagent id for a subagent.
+- `name`: the subagent's name, or its label when it has no name; `null` for `main`.
+- `status`: the subagent's status as Claude Code reports it (`running`, `completed`); `null` for `main`.
+- `tokenCount`: the current context size in tokens, `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+- `contextWindowSize`: the window of the model that holder runs on, in tokens.
+
+**When files are written.**
+
+- On every statusline call. A file's modification time says how fresh its numbers are; there is no time field inside the file. Claude Code stops calling for a subagent some time after it has `completed`, so that file stops being refreshed and keeps `status` `completed`: trust its status, not its age. When the statusline has a `refreshInterval` configured, `main.json` is also refreshed while the session is idle.
+- Not for `main` before the first reply (`current_usage` is `null`), and not when the window size is missing or not above 0. An existing file is left untouched in both cases.
+- Each file is written under a temporary name and renamed, so a reader never sees half a file. A write failure never changes what the statusline prints.
+- Without `jq` nothing is written; the statusline itself renders as before.
+
+**Cleanup.** When writing, `ctx-state.sh` removes every session directory whose newest file was modified more than a day ago. It does this at most once an hour, throttled by the modification time of `cs-ctx/.last-cleanup`, and never reads file contents.
+
+**`cs ctx wait`** blocks until one holder's context reaches a threshold, then prints one line and exits. Nothing is printed while waiting, so a background job running it wakes its caller exactly once.
+
+```
+cs ctx wait --at 60                                  # the current session, at 60% of its window
+cs ctx wait --at 60 --target builder-1               # a subagent, by name or by id
+cs ctx wait --at 80 --session <session id> --target main
+```
+
+- `--at <percent>`: reached when `tokenCount * 100 >= percent * contextWindowSize`, compared without rounding.
+- `--target`: `main` (default), a subagent id, or a subagent name; an id is tried first, then the name.
+- `--session`: defaults to `$CLAUDE_CODE_SESSION_ID`; with neither, the command fails.
+- `--interval` (default 5) is the seconds between reads of the local file; `--no-data-after` (default 300) is how long a missing or unchanged file is tolerated before giving up.
+
+| Output line | Meaning | Exit code |
+|---|---|---|
+| `REACHED <pct>% tokenCount=<n> contextWindowSize=<w> target=<name>` | threshold reached (wins over `COMPLETED` when both hold) | 0 |
+| `COMPLETED target=<name> <pct>%` | the subagent finished below the threshold | 0 |
+| `NO-DATA target=<name> reason=<why>` | no file yet after `--no-data-after`, or the file stopped updating | 2 |
+| `AMBIGUOUS target=<name> ids=<id>,...` | several subagents share that name; use an id | 2 |
+
+Usage errors (missing `--at`, no session id) exit with 1. `cs ctx wait --help` has the full reference.
+
+### 4. Usage Limit Monitoring
 
 Two sources, by necessity:
 
@@ -144,6 +271,8 @@ sessions. Both sides of the display know that:
   window is still quoting the old account — and a window you never type in again would
   quote it forever. The session's own transcript dates it: untouched since the switch
   means no response since the switch either, so the numbers go and the cache takes over.
+  This applies only to sessions on the stored login; one matched by rules 1–4 of the
+  [auth source](#auth-source) never billed to it and keeps its numbers.
 
 The practical effect: one render (≤ `refreshInterval`, 60s) after the switch, every
 window shows the new account. In between there is a brief gap where a segment is blank
@@ -164,8 +293,10 @@ Tunables (env vars):
 | `CS_USAGE_MAX_AGE` | `1800` | Ignore (and refresh) the cache once it is older than this |
 | `CS_USAGE_FORCE=1` | off | Bypass the floor (for a manual probe run) |
 | `CS_ACCOUNT_GRACE` | `900` | After an account switch, how long to distrust a session's native numbers when it has no readable transcript to date them by |
-| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | API host for the usage read |
+| `CS_USAGE_BASE_URL` | `https://api.anthropic.com` | API host for the usage read. `ANTHROPIC_BASE_URL` is not followed: it usually points at a third-party endpoint, and the read carries your claude.ai OAuth token |
 | `CS_STATUSLINE_MAX_ROWS` | `1` | Row budget per segment group (see above) |
+| `CS_AUTH_LABEL` | unset | Name of a launch profile, shown in the [auth source](#auth-source) segment |
+| `CS_AUTH_SEGMENT=0` | on | Hide the auth source segment |
 | `CS_STATUSLINE_LOG=1` | off | Write `statusline.log` (the whole stdin payload per render) |
 | `CS_STATUSLINE_LOG_MAX` | `1048576` | Rotate that log to `.log.1` past this size |
 
@@ -176,7 +307,7 @@ Tunables (env vars):
 > `usage-probe.sh` is not a revival of it: it makes no model call, it only reads the
 > usage endpoint, and only for the one number Claude Code doesn't hand us.
 
-### 4. Multiple Sessions
+### 5. Multiple Sessions
 
 Usage limits are account-wide, but each Claude Code session only learns about them from
 **its own** API responses — `rate_limits` on the statusline stdin is a per-session
@@ -219,7 +350,7 @@ So the session doing the work pays for the refresh, and every other window picks
 result up on its next render — within `refreshInterval` seconds, without asking the API
 anything itself.
 
-### 5. Smart Auto-labeling
+### 6. Smart Auto-labeling
 
 A PreToolUse hook (`cs-hook`) automatically labels each session on first tool use:
 
@@ -236,7 +367,7 @@ Examples:
 | why is usage limit not showing for other users on this machine | debug usage limit display |
 | fix bug in auth | fix bug in auth |
 
-### 6. Known Limitations
+### 7. Known Limitations
 
 - **Cached numbers can be up to `CS_USAGE_MAX_AGE` old.** A `~` value is normally seconds
   to minutes behind; if every session is idle it can be up to 30 minutes behind before the
@@ -252,12 +383,8 @@ Examples:
 - **A window-rollover in the first `CS_ACCOUNT_GRACE` after a switch can show a cached
   number for up to `CS_USAGE_MIN_INTERVAL`.** It only affects sessions whose transcript
   is unreadable, where the switch has to be bounded by a timer instead.
-- **An API-key session borrows subscription numbers.** API-key auth gets no `rate_limits`
-  on stdin, so the `~` fill shows the cached *subscription* windows, which do not govern
-  that session at all. The statusline input carries no auth-type field to tell them apart.
-  Set `CS_MODEL_USAGE=0` in a config dir used that way.
 
-### 7. Install & Upgrade
+### 8. Install & Upgrade
 
 **Recommended — Claude Code plugin** (zero-config hooks):
 
@@ -269,7 +396,7 @@ Examples:
 
 Then **exit and restart Claude Code** — the auto-labeling hook only loads on startup.
 
-The plugin auto-registers `cs-hook`. The `/claude-sessions:setup` slash command runs once to configure the statusline and symlink `cs` into `~/bin`.
+The plugin auto-registers `cs-hook`. The `/claude-sessions:setup` slash command runs once to configure the statusline and symlink `cs` into `~/bin`. Both point at `~/.claude/claude-sessions`, a symlink to the newest installed plugin version that a SessionStart hook keeps current (it only moves forward, so a session that started before an update cannot point it back), so plugin updates need no re-run of setup.
 
 **Upgrading** — Claude Code caches plugin files by version, so pulling a new commit isn't enough:
 
@@ -280,6 +407,8 @@ The plugin auto-registers `cs-hook`. The `/claude-sessions:setup` slash command 
 ```
 
 Then exit Claude Code (`exit` / Ctrl+D) and re-run `claude`. Verify in `/plugin` that the version bumped and the Errors tab has no entries for claude-sessions.
+
+If you installed before 1.6.1, run `/claude-sessions:setup` once more: it moves `statusLine`, `subagentStatusLine` and the `cs` link from the versioned cache path (which goes stale on every update) to `~/.claude/claude-sessions`.
 
 ## Troubleshooting
 
@@ -342,7 +471,7 @@ Custom bin directory: `./cs install /usr/local/bin`
 
 - Python 3.6+ — for the `cs` dashboard, auto-labeling, and the per-model usage probe
 - Linux (the `cs` dashboard uses the `/proc` filesystem)
-- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`
+- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`. The agent-panel script (`subagent-statusline.sh`) has no fallback: without `jq` it prints nothing and the panel keeps its default rows. Context state files (see Context State) are only written when `jq` is present
 
 Session and weekly (all models) limits come straight from Claude Code's statusline input — no API call, no OAuth token. Only the per-model weekly bucket needs the `usage-probe.sh` read, which uses Python's `urllib` (no `curl` dependency) and can be switched off with `CS_MODEL_USAGE=0`.
 

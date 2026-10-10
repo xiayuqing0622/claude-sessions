@@ -19,7 +19,9 @@
 #   CS_MODEL_USAGE=0          disable entirely (statusline then shows one Weekly segment)
 #   CS_USAGE_MIN_INTERVAL=180 floor between probes; CS_USAGE_FORCE=1 bypasses it
 #                             (a cache written for a different account bypasses it too)
-#   ANTHROPIC_BASE_URL        override the API host
+#   CS_USAGE_BASE_URL         override the API host. ANTHROPIC_BASE_URL is deliberately not
+#                             followed: it usually points at a third-party endpoint, and this
+#                             request carries the claude.ai login's OAuth token.
 
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 CACHE="$CLAUDE_DIR/model-usage-cache.json"
@@ -117,7 +119,7 @@ fi
 
 # The token goes through the environment, never argv (argv is world-readable in ps).
 CS_OAUTH_TOKEN="$TOKEN" \
-CS_USAGE_BASE="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}" \
+CS_USAGE_BASE="${CS_USAGE_BASE_URL:-https://api.anthropic.com}" \
 CS_ACCOUNT="$ACCOUNT" \
 python3 - "$CACHE" <<'PY' 2>/dev/null
 import calendar, json, os, re, sys, time, urllib.error, urllib.request

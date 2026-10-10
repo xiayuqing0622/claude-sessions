@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # plugin-setup.sh — finish claude-sessions setup after `/plugin install`.
 # Plugin auto-registers hooks; this script handles the two things plugins can't:
-#   1. statusLine config in $CLAUDE_CONFIG_DIR/settings.json (defaults to ~/.claude)
+#   1. statusLine + subagentStatusLine config in $CLAUDE_CONFIG_DIR/settings.json
+#      (defaults to ~/.claude)
 #   2. symlinking `cs` into ~/bin so it's runnable from the terminal
+# Both go through $CLAUDE_DIR/claude-sessions, a symlink to the installed plugin version that
+# the SessionStart hook (refresh-link.sh) keeps current, so a plugin update needs no re-run.
 set -euo pipefail
 
-PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 SETTINGS="$CLAUDE_DIR/settings.json"
 BIN_DIR="${1:-$HOME/bin}"
@@ -17,19 +20,30 @@ NC='\033[0m'
 
 mkdir -p "$BIN_DIR" "$CLAUDE_DIR"
 
+# 0. Version-free path to this plugin. Only an absent path or an existing symlink is replaced;
+#    if something else sits there, fall back to the versioned path (it then goes stale on update).
+STABLE="$CLAUDE_DIR/claude-sessions"
+if [ -L "$STABLE" ] || [ ! -e "$STABLE" ]; then
+  [ "$(readlink "$STABLE" 2>/dev/null)" = "$PLUGIN_ROOT" ] || ln -sfn "$PLUGIN_ROOT" "$STABLE"
+  ROOT="$STABLE"
+else
+  echo -e "${YELLOW}$STABLE exists and is not a symlink; using the versioned path, re-run setup after each update${NC}"
+  ROOT="$PLUGIN_ROOT"
+fi
+
 # 1. Symlink cs to ~/bin
 CS_DST="$BIN_DIR/cs"
-if [ -L "$CS_DST" ] && [ "$(readlink "$CS_DST")" = "$PLUGIN_ROOT/cs" ]; then
+if [ -L "$CS_DST" ] && [ "$(readlink "$CS_DST")" = "$ROOT/cs" ]; then
   echo -e "${DIM}cs: already linked${NC}"
 else
-  ln -sfn "$PLUGIN_ROOT/cs" "$CS_DST"
+  ln -sfn "$ROOT/cs" "$CS_DST"
   echo -e "${GREEN}cs → $CS_DST${NC}"
 fi
 
 # 2. Configure statusLine in user settings.json (preserve existing keys)
-python3 - "$SETTINGS" "$PLUGIN_ROOT/statusline.sh" <<'PY'
+python3 - "$SETTINGS" "$ROOT/statusline.sh" "$ROOT/subagent-statusline.sh" <<'PY'
 import json, os, sys
-path, sl = sys.argv[1], sys.argv[2]
+path, sl, sub = sys.argv[1], sys.argv[2], sys.argv[3]
 data = {}
 if os.path.exists(path):
     try:
@@ -46,11 +60,22 @@ data["statusLine"] = {
     "padding": 0,
     "refreshInterval": existing.get("refreshInterval", 60),
 }
+# subagentStatusLine styles the rows of the agent panel (model per subagent). Unlike
+# statusLine this is not ours alone: leave it untouched if the user pointed it at their own
+# script, and only (re)write it when it is unset or already ours.
+sub_existing = (data.get("subagentStatusLine") or {}).get("command", "")
+sub_msg = None
+if not sub_existing or "claude-sessions" in sub_existing:
+    data["subagentStatusLine"] = {"type": "command", "command": sub}
+    sub_msg = f"\033[0;32msubagentStatusLine → {sub}\033[0m"
+else:
+    sub_msg = f"\033[2msubagentStatusLine: keeping your own ({sub_existing})\033[0m"
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
     f.write("\n")
 print(f"\033[0;32mstatusLine → {sl}\033[0m")
+print(sub_msg)
 PY
 
 # 3. Ensure BIN_DIR is on PATH (only adds to rc once)
