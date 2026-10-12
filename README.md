@@ -163,7 +163,7 @@ Claude config dir — useful to see exactly which rows and fields Claude Code se
 
 ### 3. Context State and `cs ctx wait`
 
-Claude Code hands the statusline the current context size of the session and of every subagent on each refresh. `statusline.sh` and `subagent-statusline.sh` also leave it in a small file, so other programs — a lead session waiting on a builder, for instance — can read it without polling Claude Code. `ctx-state.sh` is the one script that writes these files; both statuslines call it.
+Claude Code hands the statusline the current context size of the session and of every subagent on each refresh. For a subagent on a model whose id does not start with `claude-`, `subagent-tokens.sh` first replaces Claude Code's size with the one in the subagent's transcript, because Claude Code undercounts there (see the `tokenCount` entry below). `statusline.sh` and `subagent-statusline.sh` also leave it in a small file, so other programs — a lead session waiting on a builder, for instance — can read it without polling Claude Code. `ctx-state.sh` is the one script that writes these files; both statuslines call it.
 
 **State files.** One JSON file per context holder, where a holder is the session itself or one of its subagents:
 
@@ -175,7 +175,7 @@ $CLAUDE_CONFIG_DIR/cs-ctx/<session_id>/<holder>.json      # default ~/.claude
 - `<holder>` is `main` for the session itself and the subagent id for a subagent.
 - `name`: the subagent's name, or its label when it has no name; `null` for `main`.
 - `status`: the subagent's status as Claude Code reports it (`running`, `completed`); `null` for `main`.
-- `tokenCount`: the current context size in tokens, `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
+- `tokenCount`: the current context size in tokens, `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. For a subagent whose model id does not start with `claude-`, it is read from the newest non-zero usage in the last 1 MiB of the subagent's transcript (`<session transcript without .jsonl>/subagents/agent-<id>.jsonl`) instead of from Claude Code. Providers behind an Anthropic-compatible endpoint (GLM, for one) send zeros in the streaming `message_start` event and the real counts only in `message_delta`; Claude Code's own subagent `tokenCount` is built from `message_start`, so it stays at the size of the text streamed so far. If the transcript is missing or holds no non-zero usage yet, Claude Code's value is kept. The agent panel row shows the same corrected size.
 - `contextWindowSize`: the window of the model that holder runs on, in tokens.
 
 **When files are written.**

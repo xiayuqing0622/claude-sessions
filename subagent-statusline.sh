@@ -28,10 +28,17 @@ fi
 # Without jq we print nothing, which leaves every row on the default rendering.
 command -v jq >/dev/null 2>&1 || exit 0
 
-# Leave each subagent's context size where `cs ctx wait` can read it. ctx-state.sh prints
-# nothing and cannot affect the rows below.
 ctx_dir="${BASH_SOURCE[0]%/*}"
 [ "$ctx_dir" = "${BASH_SOURCE[0]}" ] && ctx_dir=.
+
+# Claude Code's `tokenCount` is wrong for non-Anthropic models; subagent-tokens.sh corrects
+# it, so the state files and the rows below both use the corrected size.
+if [ -x "$ctx_dir/subagent-tokens.sh" ]; then
+  corrected=$("$ctx_dir/subagent-tokens.sh" <<< "$input") && [ -n "$corrected" ] && input=$corrected
+fi
+
+# Leave each subagent's context size where `cs ctx wait` can read it. ctx-state.sh prints
+# nothing and cannot affect the rows below.
 if [ -x "$ctx_dir/ctx-state.sh" ]; then
   "$ctx_dir/ctx-state.sh" subagents <<< "$input" >/dev/null 2>&1 || true
 fi
