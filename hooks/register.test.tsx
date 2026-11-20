@@ -8,7 +8,7 @@ const mountRow = async (
   $: any,
   on: any,
   props: Record<string, unknown>,
-  engine: { transcriptPath?: string; written?: string[]; transcript?: string } = {},
+  engine: { transcriptPath?: string; transcript?: string } = {},
 ) => {
   on('ui.render', ($: any, e: any) => {
     const { Text } = $.ui.resolve(e)
@@ -17,16 +17,6 @@ const mountRow = async (
   on('session.info', () => ({ value: { transcriptPath: engine.transcriptPath ?? '' } }))
   on('fs.stat', () => ({ value: { kind: 'file', size: (engine.transcript ?? '').length } }))
   on('fs.read', () => ({ value: engine.transcript ?? '' }))
-  on('session.id', () => ({ value: 'test-session' }))
-  on('env.get', () => ({ value: '/nonexistent-config-dir' }))
-  on('fs.write', (_: any, e: any) => {
-    engine.written?.push(`${e.path} ${e.text.trim()}`)
-    return { value: undefined }
-  })
-  on('process.run', (_: any, e: any) => {
-    engine.written?.push(`run ${e.argv.join(' ')}`)
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
   return $.ui.mount({
     plugin: 'claude-sessions',
     surface: 'terminal',
@@ -83,23 +73,6 @@ test('the model family sets the color, and any other model is yellow', async ($,
   expect(raw).toContain('\u001b[33mglm-5.3\u001b[0m')
 })
 
-test('a row leaves the subagent context size where cs ctx wait reads it', async ($, on) => {
-  const written: string[] = []
-  await (await mountRow($, on, { name: 'builder' }, { written })).unmount()
-  const dir = '/nonexistent-config-dir/cs-ctx/test-session'
-  // The file is written under a temporary name and renamed, so a reader never sees half of it.
-  expect(written).toEqual([
-    `${dir}/.a1.json.tmp {"name":"builder","status":"running","tokenCount":29000,"contextWindowSize":200000}`,
-    `run mv -f ${dir}/.a1.json.tmp ${dir}/a1.json`,
-  ])
-})
-
-test('an agent without a name is recorded with a null name, never its changing label', async ($, on) => {
-  const written: string[] = []
-  await (await mountRow($, on, {}, { written })).unmount()
-  expect(written[0]).toContain('{"name":null,')
-})
-
 test('a model outside the Anthropic API takes its context size from the transcript', async ($, on) => {
   // Newest non-zero usage: 10 + 3000 + 500 = 3510 (the zero-usage record after it is skipped).
   const record = (usage: object) => JSON.stringify({ type: 'assistant', message: { usage } })
@@ -109,14 +82,14 @@ test('a model outside the Anthropic API takes its context size from the transcri
     record({ input_tokens: 10, cache_read_input_tokens: 3000, cache_creation_input_tokens: 500 }),
     record({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }),
   ].join('\n')
-  const written: string[] = []
-  await (
+  const { plain } = await drawnRow(
     await mountRow(
       $,
       on,
       { model: 'glm-5.3', tokenCount: 12 },
-      { written, transcriptPath: '/t/session.jsonl', transcript },
-    )
-  ).unmount()
-  expect(written[0]).toContain('"tokenCount":3510')
+      { transcriptPath: '/t/session.jsonl', transcript },
+    ),
+  )
+  // 3510 tokens is 3.5k; 3510 * 100 / 200000 = 1.755, floored to 1%.
+  expect(plain).toBe('[general-purpose] · glm-5.3 · 3.5k (1%) · Implement the retry logic')
 })

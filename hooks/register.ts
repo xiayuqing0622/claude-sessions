@@ -1,5 +1,4 @@
-// Agent list rows: each subagent's row shows the model it actually runs on, and each
-// subagent's context size is left where `cs ctx wait` reads it.
+// Agent list rows: each subagent's row shows the model it actually runs on.
 //
 // The statusline always follows the lead session, so the model a subagent runs on (fixed at
 // spawn, and different from the lead's under CLAUDE_CODE_SUBAGENT_MODEL, say) shows only here.
@@ -23,9 +22,6 @@ const modelColor = (model: string) =>
 
 // The engine's own row writes 35.9k; the same spelling here.
 const formatTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
-
-// Ids become path components, so only plain names pass.
-const SAFE_ID = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/
 
 const TRANSCRIPT_WINDOW_BYTES = 1024 * 1024
 
@@ -67,30 +63,6 @@ const readTranscriptContext = async (
   }
 }
 
-// One small file per subagent under cs-ctx/<session id>/, rewritten on every call so its
-// modification time says how fresh the numbers are. The file is written under a temporary
-// name and renamed, so a reader never sees half a file. The statusline owns cleanup of old
-// session directories.
-const recordContext = async ($: any, agent: AgentInfo, tokenCount: number) => {
-  if (!SAFE_ID.test(agent.id) || !agent.contextWindowSize || agent.contextWindowSize <= 0) return
-  const sessionId: string = await $.session.id()
-  if (!SAFE_ID.test(sessionId)) return
-  const root =
-    (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await $.env.get('HOME')}/.claude`
-  const dir = `${root}/cs-ctx/${sessionId}`
-  const doc = {
-    // Only a real name: `description` and `label` change as the agent reports progress, so
-    // `cs ctx wait --target` could not match them. An agent without a name is targeted by id.
-    name: agent.name ?? null,
-    status: agent.status,
-    tokenCount,
-    contextWindowSize: agent.contextWindowSize,
-  }
-  const tmp = `${dir}/.${agent.id}.json.tmp`
-  await $.fs.write(tmp, `${JSON.stringify(doc)}\n`)
-  await $.process.run(['mv', '-f', tmp, `${dir}/${agent.id}.json`])
-}
-
 // `[type] name · model · effort · tokens (context %) · label`, each field left out when the
 // agent has none. `label` is what the agent is doing now (its latest progress summary, else
 // its description); it goes last because its length varies, and the engine cuts the body at
@@ -124,8 +96,6 @@ export const register: Register = on => {
         : undefined
       if (fromTranscript !== undefined) tokenCount = fromTranscript
     }
-    // The state file is a side product: a failure must never cost the row its drawing.
-    await recordContext($, agent, tokenCount).catch(() => undefined)
     return next({
       ...e,
       props: { ...e.props, body: renderBody(agent, tokenCount) },
