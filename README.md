@@ -132,7 +132,7 @@ lead's model, and stay put when you look at a subagent in the agent panel (the o
 the prompt). A subagent's model is fixed when it spawns — and can differ from the lead's, e.g.
 via `CLAUDE_CODE_SUBAGENT_MODEL` — so the main statusline has nothing to show for it.
 
-The plugin's hooks module (`hooks/register.ts`) fills that gap by drawing each row of the agent list itself, through a `ui.render` hook on the `AgentRow` component. Each row reads `[type] name · model · effort · tokens (context %) · label`: the agent type it was spawned as, its name, the model it **actually runs on** (the resolved ID, e.g. `sonnet-5-5`, `glm-5.3-flash`), its effort, its context size against the model's window, and what it is doing now (its latest progress summary, else its description). A field the agent does not have — no name, no type, no effort of its own — is left out. The context size is Claude Code's `tokenCount`: the latest request's input, cache reads and cache writes included, plus that request's output.
+The plugin's hooks module (`hooks/register.ts`) fills that gap by drawing each row of the agent list itself, through a `ui.render` hook on the `AgentRow` component. Each row reads `[type] name · model · effort · tokens (context %) · label`: the agent type it was spawned as, its name, the model it **actually runs on** (the resolved ID, e.g. `sonnet-5-5`, `glm-5.3-flash`), its effort, its context size against the model's window, and what it is doing now (its latest progress summary, else its description). A field the agent does not have — no name, no type, no effort of its own — is left out. The context size is Claude Code's `tokenCount`: the latest request's input, cache reads and cache writes included, plus that request's output. For a subagent on a model whose id does not start with `claude-`, the row reads it from the subagent's transcript instead: the newest non-zero `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` in the last 1 MiB of `<session transcript without .jsonl>/subagents/agent-<id>.jsonl`. Providers behind an Anthropic-compatible endpoint (GLM, for one) send zeros in the streaming `message_start` event and the real counts only in `message_delta`; Claude Code's own subagent `tokenCount` is built from `message_start`, so it stays at the size of the text streamed so far. If the transcript is missing or holds no non-zero usage yet, Claude Code's value is kept.
 
 ```
 [general-purpose] builder · sonnet-5-5 · high · 29.0k (14%) · Implement the retry logic
@@ -142,55 +142,7 @@ Models are colored by family (opus / sonnet / haiku / fable); anything else — 
 
 The hook needs a Claude Code version that supports hooks modules (`ui.render` on `AgentRow`). With agent teams on (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`), teammate rows go through the same hook.
 
-### 3. Context State and `cs ctx wait`
-
-Claude Code hands the statusline the current context size of the session, and the agent row hook the current context size of every subagent, on each refresh. For a subagent on a model whose id does not start with `claude-`, the hook first replaces Claude Code's size with the one in the subagent's transcript, because Claude Code undercounts there (see the `tokenCount` entry below). Both leave it in a small file, so other programs — a lead session waiting on a builder, for instance — can read it without polling Claude Code. `ctx-state.sh` (called by `statusline.sh`) writes the `main` file, and `hooks/register.ts` writes each subagent's, in the same format.
-
-**State files.** One JSON file per context holder, where a holder is the session itself or one of its subagents:
-
-```
-$CLAUDE_CONFIG_DIR/cs-ctx/<session_id>/<holder>.json      # default ~/.claude
-{"name": "builder", "status": "running", "tokenCount": 28607, "contextWindowSize": 200000}
-```
-
-- `<holder>` is `main` for the session itself and the subagent id for a subagent.
-- `name`: the subagent's name; `null` for `main` and for a subagent without one, which is targeted by id. Its description and label change as it reports progress, so neither stands in for a name.
-- `status`: the subagent's status as Claude Code reports it (`running`, `completed`); `null` for `main`.
-- `tokenCount`: the current context size in tokens, `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. For a subagent whose model id does not start with `claude-`, it is read from the newest non-zero usage in the last 1 MiB of the subagent's transcript (`<session transcript without .jsonl>/subagents/agent-<id>.jsonl`) instead of from Claude Code. Providers behind an Anthropic-compatible endpoint (GLM, for one) send zeros in the streaming `message_start` event and the real counts only in `message_delta`; Claude Code's own subagent `tokenCount` is built from `message_start`, so it stays at the size of the text streamed so far. If the transcript is missing or holds no non-zero usage yet, Claude Code's value is kept. The agent list row shows the same corrected size.
-- `contextWindowSize`: the window of the model that holder runs on, in tokens.
-
-**When files are written.**
-
-- On every statusline call (`main`) and every refresh of a subagent's row (a subagent). A file's modification time says how fresh its numbers are; there is no time field inside the file. Claude Code stops calling for a subagent some time after it has `completed`, so that file stops being refreshed and keeps `status` `completed`: trust its status, not its age. When the statusline has a `refreshInterval` configured, `main.json` is also refreshed while the session is idle.
-- Not for `main` before the first reply (`current_usage` is `null`), and not when the window size is missing or not above 0. An existing file is left untouched in both cases.
-- Each file is written under a temporary name and renamed, so a reader never sees half a file. A write failure never changes what the statusline prints.
-- Without `jq` nothing is written; the statusline itself renders as before.
-
-**Cleanup.** When writing, `ctx-state.sh` removes every session directory whose newest file was modified more than a day ago. It does this at most once an hour, throttled by the modification time of `cs-ctx/.last-cleanup`, and never reads file contents.
-
-**`cs ctx wait`** blocks until one holder's context reaches a threshold, then prints one line and exits. Nothing is printed while waiting, so a background job running it wakes its caller exactly once.
-
-```
-cs ctx wait --at 60                                  # the current session, at 60% of its window
-cs ctx wait --at 60 --target builder-1               # a subagent, by name or by id
-cs ctx wait --at 80 --session <session id> --target main
-```
-
-- `--at <percent>`: reached when `tokenCount * 100 >= percent * contextWindowSize`, compared without rounding.
-- `--target`: `main` (default), a subagent id, or a subagent name; an id is tried first, then the name.
-- `--session`: defaults to `$CLAUDE_CODE_SESSION_ID`; with neither, the command fails.
-- `--interval` (default 5) is the seconds between reads of the local file; `--no-data-after` (default 300) is how long a missing or unchanged file is tolerated before giving up.
-
-| Output line | Meaning | Exit code |
-|---|---|---|
-| `REACHED <pct>% tokenCount=<n> contextWindowSize=<w> target=<name>` | threshold reached (wins over `COMPLETED` when both hold) | 0 |
-| `COMPLETED target=<name> <pct>%` | the subagent finished below the threshold | 0 |
-| `NO-DATA target=<name> reason=<why>` | no file yet after `--no-data-after`, or the file stopped updating | 2 |
-| `AMBIGUOUS target=<name> ids=<id>,...` | several subagents share that name; use an id | 2 |
-
-Usage errors (missing `--at`, no session id) exit with 1. `cs ctx wait --help` has the full reference.
-
-### 4. Usage Limit Monitoring
+### 3. Usage Limit Monitoring
 
 Two sources, by necessity:
 
@@ -290,7 +242,7 @@ Tunables (env vars):
 > `usage-probe.sh` is not a revival of it: it makes no model call, it only reads the
 > usage endpoint, and only for the one number Claude Code doesn't hand us.
 
-### 5. Multiple Sessions
+### 4. Multiple Sessions
 
 Usage limits are account-wide, but each Claude Code session only learns about them from
 **its own** API responses — `rate_limits` on the statusline stdin is a per-session
@@ -333,7 +285,7 @@ So the session doing the work pays for the refresh, and every other window picks
 result up on its next render — within `refreshInterval` seconds, without asking the API
 anything itself.
 
-### 6. Smart Auto-labeling
+### 5. Smart Auto-labeling
 
 A PreToolUse hook (`cs-hook`) automatically labels each session on first tool use:
 
@@ -350,7 +302,7 @@ Examples:
 | why is usage limit not showing for other users on this machine | debug usage limit display |
 | fix bug in auth | fix bug in auth |
 
-### 7. Known Limitations
+### 6. Known Limitations
 
 - **Cached numbers can be up to `CS_USAGE_MAX_AGE` old.** A `~` value is normally seconds
   to minutes behind; if every session is idle it can be up to 30 minutes behind before the
@@ -373,7 +325,7 @@ Examples:
   number for up to `CS_USAGE_MIN_INTERVAL`.** It only affects sessions whose transcript
   is unreadable, where the switch has to be bounded by a timer instead.
 
-### 8. Install & Upgrade
+### 7. Install & Upgrade
 
 **Recommended — Claude Code plugin** (zero-config hooks):
 
@@ -460,7 +412,7 @@ Custom bin directory: `./cs install /usr/local/bin`
 
 - Python 3.6+ — for the `cs` dashboard, auto-labeling, and the per-model usage probe
 - Linux (the `cs` dashboard uses the `/proc` filesystem)
-- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`. The agent list rows do not use `jq`. The `main` context state file (see Context State) is only written when `jq` is present
+- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`. The agent list rows do not use `jq`.
 
 Session and weekly (all models) limits come straight from Claude Code's statusline input — no API call, no OAuth token. Only the per-model weekly bucket needs the `usage-probe.sh` read, which uses Python's `urllib` (no `curl` dependency) and can be switched off with `CS_MODEL_USAGE=0`.
 
