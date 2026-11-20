@@ -21,7 +21,8 @@ const modelColor = (model: string) =>
   : /fable/.test(model) ? '34'
   : '33'
 
-const formatTokens = (n: number) => (n >= 1000 ? `${Math.floor(n / 1000)}k` : String(n))
+// The engine's own row writes 35.9k; the same spelling here.
+const formatTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
 // Ids become path components, so only plain names pass.
 const SAFE_ID = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/
@@ -78,7 +79,9 @@ const recordContext = async ($: any, agent: AgentInfo, tokenCount: number) => {
     (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${await $.env.get('HOME')}/.claude`
   const dir = `${root}/cs-ctx/${sessionId}`
   const doc = {
-    name: agent.name ?? agent.description,
+    // Only a real name: `description` and `label` change as the agent reports progress, so
+    // `cs ctx wait --target` could not match them. An agent without a name is targeted by id.
+    name: agent.name ?? null,
     status: agent.status,
     tokenCount,
     contextWindowSize: agent.contextWindowSize,
@@ -88,34 +91,26 @@ const recordContext = async ($: any, agent: AgentInfo, tokenCount: number) => {
   await $.process.run(['mv', '-f', tmp, `${dir}/${agent.id}.json`])
 }
 
-const renderBody = (agent: AgentInfo, tokenCount: number, columns: number) => {
-  const name = agent.name ?? agent.description ?? agent.id
-  const model = agent.model ? shortModel(agent.model) : ''
-  const effort = agent.effort === undefined ? '' : String(agent.effort)
-  const percent =
-    agent.contextWindowSize && agent.contextWindowSize > 0
-      ? ` (${Math.floor((tokenCount * 100) / agent.contextWindowSize)}%)`
-      : ''
-  const plain =
-    `${name} · ${model || '…'}${effort ? ` · ${effort}` : ''} · ${formatTokens(tokenCount)}${percent}`
-  // The engine indents the row itself; slack keeps the summary from wrapping it.
-  const room = columns - plain.length - 8
-  // What the agent is doing now: the engine's own row shows the same words beside the name.
-  // `label` is its latest progress summary, else its description; when that is the row's
-  // title (a plain subagent has no name), print it only once.
-  const summary = (agent.label ?? '').replace(/[\r\n]+/g, ' ')
-  const tail =
-    summary !== '' && summary !== name && room > 8
-      ? ` · ${summary.length > room ? `${summary.slice(0, room - 1)}…` : summary}`
-      : ''
-  return (
-    paint('1', name) +
-    paint('2', ' · ') +
-    (model ? paint(modelColor(model), model) : paint('2', '…')) +
-    (effort ? paint('2', ` · ${effort}`) : '') +
-    paint('2', ` · ${formatTokens(tokenCount)}${percent}`) +
-    paint('2', tail)
-  )
+// `[type] name · model · effort · tokens (context %) · label`, each field left out when the
+// agent has none. `label` is what the agent is doing now (its latest progress summary, else
+// its description); it goes last because its length varies, and the engine cuts the body at
+// the row's edge.
+const renderBody = (agent: AgentInfo, tokenCount: number) => {
+  const model = agent.model ? shortModel(agent.model) : undefined
+  const percent = agent.contextWindowSize
+    ? ` (${Math.floor((tokenCount * 100) / agent.contextWindowSize)}%)`
+    : ''
+  const head = [agent.type && paint('2', `[${agent.type}]`), agent.name && paint('1', agent.name)]
+    .filter(Boolean)
+    .join(' ')
+  const fields = [
+    head,
+    model && paint(modelColor(model), model),
+    agent.effort !== undefined && paint('2', String(agent.effort)),
+    paint('2', `${formatTokens(tokenCount)}${percent}`),
+    agent.label.replace(/[\r\n]+/g, ' '),
+  ]
+  return fields.filter(Boolean).join(paint('2', ' · '))
 }
 
 export const register: Register = on => {
@@ -133,7 +128,7 @@ export const register: Register = on => {
     await recordContext($, agent, tokenCount).catch(() => undefined)
     return next({
       ...e,
-      props: { ...e.props, body: renderBody(agent, tokenCount, e.props.columns ?? 80) },
+      props: { ...e.props, body: renderBody(agent, tokenCount) },
     })
   })
 }

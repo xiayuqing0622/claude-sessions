@@ -132,10 +132,10 @@ lead's model, and stay put when you look at a subagent in the agent panel (the o
 the prompt). A subagent's model is fixed when it spawns — and can differ from the lead's, e.g.
 via `CLAUDE_CODE_SUBAGENT_MODEL` — so the main statusline has nothing to show for it.
 
-The plugin's hooks module (`hooks/register.ts`) fills that gap by drawing each row of the agent list itself, through a `ui.render` hook on the `AgentRow` component. Every subagent row gets the model the agent **actually runs on** (the resolved ID, e.g. `sonnet-5-5`, `glm-5.3-flash`), plus effort, token count and context %:
+The plugin's hooks module (`hooks/register.ts`) fills that gap by drawing each row of the agent list itself, through a `ui.render` hook on the `AgentRow` component. Each row reads `[type] name · model · effort · tokens (context %) · label`: the agent type it was spawned as, its name, the model it **actually runs on** (the resolved ID, e.g. `sonnet-5-5`, `glm-5.3-flash`), its effort, its context size against the model's window, and what it is doing now (its latest progress summary, else its description). A field the agent does not have — no name, no type, no effort of its own — is left out. The context size is Claude Code's `tokenCount`: the latest request's input, cache reads and cache writes included, plus that request's output.
 
 ```
-builder · sonnet-5-5 · high · 29k (14%) · Implement the retry logic
+[general-purpose] builder · sonnet-5-5 · high · 29.0k (14%) · Implement the retry logic
 ```
 
 Models are colored by family (opus / sonnet / haiku / fable); anything else — GLM, Kimi, a custom gateway model — is yellow, so a subagent that ended up on an unexpected model stands out. Nothing has to be configured: the module loads with the plugin. A `subagentStatusLine` left in `settings.json` by an earlier version is removed by `/claude-sessions:setup`; Claude Code deprecated that setting in favour of hooks modules.
@@ -154,7 +154,7 @@ $CLAUDE_CONFIG_DIR/cs-ctx/<session_id>/<holder>.json      # default ~/.claude
 ```
 
 - `<holder>` is `main` for the session itself and the subagent id for a subagent.
-- `name`: the subagent's name, or its label when it has no name; `null` for `main`.
+- `name`: the subagent's name; `null` for `main` and for a subagent without one, which is targeted by id. Its description and label change as it reports progress, so neither stands in for a name.
 - `status`: the subagent's status as Claude Code reports it (`running`, `completed`); `null` for `main`.
 - `tokenCount`: the current context size in tokens, `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. For a subagent whose model id does not start with `claude-`, it is read from the newest non-zero usage in the last 1 MiB of the subagent's transcript (`<session transcript without .jsonl>/subagents/agent-<id>.jsonl`) instead of from Claude Code. Providers behind an Anthropic-compatible endpoint (GLM, for one) send zeros in the streaming `message_start` event and the real counts only in `message_delta`; Claude Code's own subagent `tokenCount` is built from `message_start`, so it stays at the size of the text streamed so far. If the transcript is missing or holds no non-zero usage yet, Claude Code's value is kept. The agent list row shows the same corrected size.
 - `contextWindowSize`: the window of the model that holder runs on, in tokens.
