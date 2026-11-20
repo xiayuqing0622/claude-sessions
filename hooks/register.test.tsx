@@ -35,6 +35,7 @@ const mountRow = async (
       status: 'running',
       kind: 'local_agent',
       description: 'Implement the retry logic',
+      label: 'Implement the retry logic',
       type: 'builder',
       columns: 120,
       isHidden: false,
@@ -44,7 +45,7 @@ const mountRow = async (
   })
 }
 
-test('a row shows name, model, effort, tokens with context percent and the description', async ($, on) => {
+test('a row shows name, model, effort, tokens with context percent and the progress summary', async ($, on) => {
   // 29000 / 200000 = 14.5%, floored to 14%
   const ui = await mountRow($, on, {
     name: 'builder',
@@ -109,4 +110,20 @@ test('a model outside the Anthropic API takes its context size from the transcri
   )
   await ui.unmount()
   expect(written[0]).toContain('"tokenCount":3510')
+})
+
+test('the tail is the live progress summary, not the static description', async ($, on) => {
+  const ui = await mountRow($, on, {
+    name: 'builder',
+    model: 'claude-haiku-4-5-20251001',
+    tokenCount: 1000,
+    contextWindowSize: 200000,
+    label: 'Editing register.ts\nrunning tests',
+  })
+  const row = await ui.find({ type: 'Text' })
+  // Line breaks in the summary become spaces; 1000 tokens is 1k, 0.5% floors to 0%.
+  expect(JSON.parse(row?.text ?? '""').replace(/\u001b\[[0-9;]*m/g, '')).toBe(
+    'builder · haiku-4-5 · 1k (0%) · Editing register.ts running tests',
+  )
+  await ui.unmount()
 })

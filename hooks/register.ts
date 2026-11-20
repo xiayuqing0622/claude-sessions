@@ -98,13 +98,15 @@ const renderBody = (agent: AgentInfo, tokenCount: number, columns: number) => {
       : ''
   const plain =
     `${name} · ${model || '…'}${effort ? ` · ${effort}` : ''} · ${formatTokens(tokenCount)}${percent}`
-  // The engine indents the row itself; slack keeps the description from wrapping it.
+  // The engine indents the row itself; slack keeps the summary from wrapping it.
   const room = columns - plain.length - 8
-  // The description is the row's title when there is no name; print it only once.
-  const description = (agent.description ?? '').replace(/[\r\n]+/g, ' ')
+  // What the agent is doing now: the engine's own row shows the same words beside the name.
+  // `label` is its latest progress summary, else its description; when that is the row's
+  // title (a plain subagent has no name), print it only once.
+  const summary = (agent.label ?? '').replace(/[\r\n]+/g, ' ')
   const tail =
-    description !== '' && description !== name && room > 8
-      ? ` · ${description.length > room ? `${description.slice(0, room - 1)}…` : description}`
+    summary !== '' && summary !== name && room > 8
+      ? ` · ${summary.length > room ? `${summary.slice(0, room - 1)}…` : summary}`
       : ''
   return (
     paint('1', name) +
