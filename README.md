@@ -132,38 +132,19 @@ lead's model, and stay put when you look at a subagent in the agent panel (the o
 the prompt). A subagent's model is fixed when it spawns — and can differ from the lead's, e.g.
 via `CLAUDE_CODE_SUBAGENT_MODEL` — so the main statusline has nothing to show for it.
 
-`subagent-statusline.sh` fills that gap through Claude Code's `subagentStatusLine`
-setting, which styles each row of the agent panel. Every subagent row gets the model the
-agent **actually runs on** (the resolved ID, e.g. `sonnet-5-5`, `glm-5.3-flash`), plus effort,
-token count and context %:
+The plugin's hooks module (`hooks/register.ts`) fills that gap by drawing each row of the agent list itself, through a `ui.render` hook on the `AgentRow` component. Every subagent row gets the model the agent **actually runs on** (the resolved ID, e.g. `sonnet-5-5`, `glm-5.3-flash`), plus effort, token count and context %:
 
 ```
 builder · sonnet-5-5 · high · 29k (14%) · Implement the retry logic
 ```
 
-Models are colored by family (opus / sonnet / haiku / fable); anything else — GLM, Kimi, a
-custom gateway model — is yellow, so a subagent that ended up on an unexpected model stands
-out. The setup step registers it next to `statusLine`:
+Models are colored by family (opus / sonnet / haiku / fable); anything else — GLM, Kimi, a custom gateway model — is yellow, so a subagent that ended up on an unexpected model stands out. Nothing has to be configured: the module loads with the plugin. A `subagentStatusLine` left in `settings.json` by an earlier version is removed by `/claude-sessions:setup`; Claude Code deprecated that setting in favour of hooks modules.
 
-```json
-"subagentStatusLine": { "type": "command", "command": "…/subagent-statusline.sh" }
-```
-
-**Agent teams are not covered.** With `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, a subagent
-Claude gives a `name` launches as a *teammate*, and teammate rows are never sent to this
-script — they keep the default `name · description · tokens` row. With teams off
-(`=0`) a named subagent is an ordinary one: it shows up here with its model and can still be
-messaged by name.
-
-Unlike `statusLine`, the installer leaves `subagentStatusLine` alone if you already point it
-at your own script. It needs `jq` and **needs Claude Code v2.1.205+** (earlier versions do
-not send the per-row `model`); without either, rows keep their default rendering.
-`CS_SUBAGENT_DEBUG=1` appends the raw stdin to `subagent-statusline-input.jsonl` in your
-Claude config dir — useful to see exactly which rows and fields Claude Code sends.
+The hook needs a Claude Code version that supports hooks modules (`ui.render` on `AgentRow`). With agent teams on (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`), teammate rows go through the same hook.
 
 ### 3. Context State and `cs ctx wait`
 
-Claude Code hands the statusline the current context size of the session and of every subagent on each refresh. For a subagent on a model whose id does not start with `claude-`, `subagent-tokens.sh` first replaces Claude Code's size with the one in the subagent's transcript, because Claude Code undercounts there (see the `tokenCount` entry below). `statusline.sh` and `subagent-statusline.sh` also leave it in a small file, so other programs — a lead session waiting on a builder, for instance — can read it without polling Claude Code. `ctx-state.sh` is the one script that writes these files; both statuslines call it.
+Claude Code hands the statusline the current context size of the session, and the agent row hook the current context size of every subagent, on each refresh. For a subagent on a model whose id does not start with `claude-`, the hook first replaces Claude Code's size with the one in the subagent's transcript, because Claude Code undercounts there (see the `tokenCount` entry below). Both leave it in a small file, so other programs — a lead session waiting on a builder, for instance — can read it without polling Claude Code. `ctx-state.sh` (called by `statusline.sh`) writes the `main` file, and `hooks/register.ts` writes each subagent's, in the same format.
 
 **State files.** One JSON file per context holder, where a holder is the session itself or one of its subagents:
 
@@ -175,12 +156,12 @@ $CLAUDE_CONFIG_DIR/cs-ctx/<session_id>/<holder>.json      # default ~/.claude
 - `<holder>` is `main` for the session itself and the subagent id for a subagent.
 - `name`: the subagent's name, or its label when it has no name; `null` for `main`.
 - `status`: the subagent's status as Claude Code reports it (`running`, `completed`); `null` for `main`.
-- `tokenCount`: the current context size in tokens, `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. For a subagent whose model id does not start with `claude-`, it is read from the newest non-zero usage in the last 1 MiB of the subagent's transcript (`<session transcript without .jsonl>/subagents/agent-<id>.jsonl`) instead of from Claude Code. Providers behind an Anthropic-compatible endpoint (GLM, for one) send zeros in the streaming `message_start` event and the real counts only in `message_delta`; Claude Code's own subagent `tokenCount` is built from `message_start`, so it stays at the size of the text streamed so far. If the transcript is missing or holds no non-zero usage yet, Claude Code's value is kept. The agent panel row shows the same corrected size.
+- `tokenCount`: the current context size in tokens, `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`. For a subagent whose model id does not start with `claude-`, it is read from the newest non-zero usage in the last 1 MiB of the subagent's transcript (`<session transcript without .jsonl>/subagents/agent-<id>.jsonl`) instead of from Claude Code. Providers behind an Anthropic-compatible endpoint (GLM, for one) send zeros in the streaming `message_start` event and the real counts only in `message_delta`; Claude Code's own subagent `tokenCount` is built from `message_start`, so it stays at the size of the text streamed so far. If the transcript is missing or holds no non-zero usage yet, Claude Code's value is kept. The agent list row shows the same corrected size.
 - `contextWindowSize`: the window of the model that holder runs on, in tokens.
 
 **When files are written.**
 
-- On every statusline call. A file's modification time says how fresh its numbers are; there is no time field inside the file. Claude Code stops calling for a subagent some time after it has `completed`, so that file stops being refreshed and keeps `status` `completed`: trust its status, not its age. When the statusline has a `refreshInterval` configured, `main.json` is also refreshed while the session is idle.
+- On every statusline call (`main`) and every refresh of a subagent's row (a subagent). A file's modification time says how fresh its numbers are; there is no time field inside the file. Claude Code stops calling for a subagent some time after it has `completed`, so that file stops being refreshed and keeps `status` `completed`: trust its status, not its age. When the statusline has a `refreshInterval` configured, `main.json` is also refreshed while the session is idle.
 - Not for `main` before the first reply (`current_usage` is `null`), and not when the window size is missing or not above 0. An existing file is left untouched in both cases.
 - Each file is written under a temporary name and renamed, so a reader never sees half a file. A write failure never changes what the statusline prints.
 - Without `jq` nothing is written; the statusline itself renders as before.
@@ -416,7 +397,7 @@ The plugin auto-registers `cs-hook`. The `/claude-sessions:setup` slash command 
 
 Then exit Claude Code (`exit` / Ctrl+D) and re-run `claude`. Verify in `/plugin` that the version bumped and the Errors tab has no entries for claude-sessions.
 
-If you installed before 1.6.1, run `/claude-sessions:setup` once more: it moves `statusLine`, `subagentStatusLine` and the `cs` link from the versioned cache path (which goes stale on every update) to `~/.claude/claude-sessions`.
+If you installed before 1.6.1, run `/claude-sessions:setup` once more: it moves `statusLine` and the `cs` link from the versioned cache path (which goes stale on every update) to `~/.claude/claude-sessions`.
 
 ## Troubleshooting
 
@@ -479,7 +460,7 @@ Custom bin directory: `./cs install /usr/local/bin`
 
 - Python 3.6+ — for the `cs` dashboard, auto-labeling, and the per-model usage probe
 - Linux (the `cs` dashboard uses the `/proc` filesystem)
-- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`. The agent-panel script (`subagent-statusline.sh`) has no fallback: without `jq` it prints nothing and the panel keeps its default rows. Context state files (see Context State) are only written when `jq` is present
+- `jq` — **optional**; the statusline parses its JSON with a pure-bash fallback when `jq` isn't on `PATH`. The agent list rows do not use `jq`. The `main` context state file (see Context State) is only written when `jq` is present
 
 Session and weekly (all models) limits come straight from Claude Code's statusline input — no API call, no OAuth token. Only the per-model weekly bucket needs the `usage-probe.sh` read, which uses Python's `urllib` (no `curl` dependency) and can be switched off with `CS_MODEL_USAGE=0`.
 

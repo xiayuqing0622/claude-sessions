@@ -28,7 +28,7 @@ done
 case "$sl_self" in */*) sl_real_dir="${sl_self%/*}" ;; *) sl_real_dir="." ;; esac
 unset _hop _link
 if [ "$HAS_JQ" -eq 1 ] && [ -x "$sl_real_dir/ctx-state.sh" ]; then
-  "$sl_real_dir/ctx-state.sh" main <<< "$input" >/dev/null 2>&1 || true
+  "$sl_real_dir/ctx-state.sh" <<< "$input" >/dev/null 2>&1 || true
 fi
 
 # ---- terminal width detection ----

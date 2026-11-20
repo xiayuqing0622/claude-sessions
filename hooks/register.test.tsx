@@ -1,0 +1,112 @@
+import { expect, test } from 'claude-code/testing'
+
+// Nothing sits beneath the plugin: this hook stands for the engine and draws the body the
+// plugin set as JSON text, because a Text child may not hold a raw escape sequence.
+const mountRow = async (
+  $: any,
+  on: any,
+  props: Record<string, unknown>,
+  engine: { transcriptPath?: string; written?: string[]; transcript?: string } = {},
+) => {
+  on('ui.render', ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>{JSON.stringify(e.props.body)}</Text>
+  })
+  on('session.info', () => ({ value: { transcriptPath: engine.transcriptPath ?? '' } }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: (engine.transcript ?? '').length } }))
+  on('fs.read', () => ({ value: engine.transcript ?? '' }))
+  on('session.id', () => ({ value: 'test-session' }))
+  on('env.get', () => ({ value: '/nonexistent-config-dir' }))
+  on('fs.write', (_: any, e: any) => {
+    engine.written?.push(`${e.path} ${e.text.trim()}`)
+    return { value: undefined }
+  })
+  on('process.run', (_: any, e: any) => {
+    engine.written?.push(`run ${e.argv.join(' ')}`)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  return $.ui.mount({
+    plugin: 'claude-sessions',
+    surface: 'terminal',
+    component: 'AgentRow',
+    requestId: 'a1',
+    props: {
+      id: 'a1',
+      status: 'running',
+      kind: 'local_agent',
+      description: 'Implement the retry logic',
+      type: 'builder',
+      columns: 120,
+      isHidden: false,
+      rowIds: ['a1'],
+      ...props,
+    },
+  })
+}
+
+test('a row shows name, model, effort, tokens with context percent and the description', async ($, on) => {
+  // 29000 / 200000 = 14.5%, floored to 14%
+  const ui = await mountRow($, on, {
+    name: 'builder',
+    model: 'claude-sonnet-5-5',
+    effort: 'high',
+    tokenCount: 29000,
+    contextWindowSize: 200000,
+  })
+  const row = await ui.find({ type: 'Text' })
+  expect(JSON.parse(row?.text ?? '""').replace(/\u001b\[[0-9;]*m/g, '')).toBe(
+    'builder · sonnet-5-5 · high · 29k (14%) · Implement the retry logic',
+  )
+  await ui.unmount()
+})
+
+test('the model family sets the color, and any other model is yellow', async ($, on) => {
+  const ui = await mountRow($, on, {
+    name: 'b',
+    model: 'glm-5.3[1m]',
+    tokenCount: 500,
+    contextWindowSize: 200000,
+  })
+  const row = await ui.find({ type: 'Text' })
+  // glm-5.3 is not an Anthropic family: SGR 33. Below 1000 tokens the count is exact.
+  expect(row?.text).toContain('\\u001b[33mglm-5.3\\u001b[0m')
+  expect(JSON.parse(row?.text ?? '""').replace(/\u001b\[[0-9;]*m/g, '')).toContain(' · 500 (0%)')
+  await ui.unmount()
+})
+
+test('a row leaves the subagent context size where cs ctx wait reads it', async ($, on) => {
+  const written: string[] = []
+  const ui = await mountRow(
+    $,
+    on,
+    { name: 'builder', status: 'running', model: 'claude-sonnet-5-5', tokenCount: 29000, contextWindowSize: 200000 },
+    { written },
+  )
+  await ui.unmount()
+  const dir = '/nonexistent-config-dir/cs-ctx/test-session'
+  // The file is written under a temporary name and renamed, so a reader never sees half of it.
+  expect(written).toEqual([
+    `${dir}/.a1.json.tmp {"name":"builder","status":"running","tokenCount":29000,"contextWindowSize":200000}`,
+    `run mv -f ${dir}/.a1.json.tmp ${dir}/a1.json`,
+  ])
+})
+
+test('a model outside the Anthropic API takes its context size from the transcript', async ($, on) => {
+  // Newest non-zero usage: 10 + 3000 + 500 = 3510 (the zero-usage record after it is skipped).
+  const record = (usage: object) => JSON.stringify({ type: 'assistant', message: { usage } })
+  const transcript = [
+    'cut-in-half-line}',
+    record({ input_tokens: 1, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 }),
+    record({ input_tokens: 10, cache_read_input_tokens: 3000, cache_creation_input_tokens: 500 }),
+    record({ input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }),
+  ].join('\n')
+  const written: string[] = []
+  const ui = await mountRow(
+    $,
+    on,
+    { name: 'g', status: 'running', model: 'glm-5.3', tokenCount: 12, contextWindowSize: 200000 },
+    { written, transcriptPath: '/t/session.jsonl', transcript },
+  )
+  await ui.unmount()
+  expect(written[0]).toContain('"tokenCount":3510')
+})

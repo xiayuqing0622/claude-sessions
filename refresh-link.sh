@@ -3,8 +3,8 @@
 # version in its path) pointing at the newest plugin version in use.
 #
 # Claude Code caches a plugin under .../claude-sessions/<version>/, so any path into the
-# cache goes stale after an update. plugin-setup.sh writes statusLine, subagentStatusLine and
-# the `cs` link through $CLAUDE_DIR/claude-sessions instead, and this hook re-points that one
+# cache goes stale after an update. plugin-setup.sh writes statusLine and the `cs`
+# link through $CLAUDE_DIR/claude-sessions instead, and this hook re-points that one
 # link after each update; nothing else has to be re-run.
 #
 # A session keeps running the plugin version it loaded at startup, and SessionStart also fires

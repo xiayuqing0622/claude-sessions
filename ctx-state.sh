@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ctx-state.sh — keep each context holder's latest context size where other programs can
-# read it. Called by statusline.sh (mode `main`) and subagent-statusline.sh (mode
-# `subagents`) with the status line JSON on stdin; `cs ctx wait` is the reader.
+# ctx-state.sh — keep the session's latest context size where other programs can read it.
+# Called by statusline.sh with the status line JSON on stdin; `cs ctx wait` is the reader.
+# The subagents' files are written by hooks/register.ts, in the same format.
 #
 # A context holder is the session itself (`main`) or one of its subagents (by subagent id).
 # Each holder gets one small file:
@@ -36,38 +36,25 @@ CLEANUP_INTERVAL_MIN=60
 
 command -v jq >/dev/null 2>&1 || exit 0
 
-mode="${1:-}"
-case "$mode" in main|subagents) ;; *) exit 0 ;; esac
-
 root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cs-ctx"
 input=$(cat)
 
 # One line per file to write: session_id, holder id, JSON document, separated by tabs.
 # Ids become path components, so only plain names pass.
-records=$(printf '%s' "$input" | jq -r --arg mode "$mode" '
+records=$(printf '%s' "$input" | jq -r '
   def safe_id: type == "string" and test("^[A-Za-z0-9_][A-Za-z0-9._-]*$");
-  def row($sid; $id; $doc): [$sid, $id, ($doc | tojson)] | join("\t");
 
   .session_id as $sid
   | select($sid | safe_id)
-  | if $mode == "main" then
-      (.context_window // {}) as $cw
-      | $cw.current_usage as $u
-      | select($u != null and ($cw.context_window_size | type == "number" and . > 0))
-      | row($sid; "main"; {
-          name: null, status: null,
-          tokenCount: (($u.input_tokens // 0) + ($u.cache_read_input_tokens // 0)
-                       + ($u.cache_creation_input_tokens // 0)),
-          contextWindowSize: $cw.context_window_size})
-    else
-      (.tasks // [])[]
-      | select((.id | safe_id)
-               and (.contextWindowSize | type == "number" and . > 0)
-               and (.tokenCount | type == "number"))
-      | row($sid; .id; {
-          name: (.name // .label), status: .status,
-          tokenCount: .tokenCount, contextWindowSize: .contextWindowSize})
-    end') || exit 0
+  | (.context_window // {}) as $cw
+  | $cw.current_usage as $u
+  | select($u != null and ($cw.context_window_size | type == "number" and . > 0))
+  | [$sid, "main", ({
+      name: null, status: null,
+      tokenCount: (($u.input_tokens // 0) + ($u.cache_read_input_tokens // 0)
+                   + ($u.cache_creation_input_tokens // 0)),
+      contextWindowSize: $cw.context_window_size} | tojson)]
+  | join("\t")') || exit 0
 [ -n "$records" ] || exit 0
 
 while IFS=$'\t' read -r sid id doc; do

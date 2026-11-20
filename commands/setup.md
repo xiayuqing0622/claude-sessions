@@ -3,7 +3,7 @@ description: Finish claude-sessions install — configure statusline + add cs to
 allowed-tools: Bash
 ---
 
-You are completing the post-install setup for the `claude-sessions` plugin. The plugin's hooks are already active; you need to do the two things plugins can't do automatically: configure the user's `statusLine` (plus `subagentStatusLine`, the agent-panel rows, unless they already set their own) and symlink `cs` into `~/bin`.
+You are completing the post-install setup for the `claude-sessions` plugin. The plugin's hooks are already active; you need to do the two things plugins can't do automatically: configure the user's `statusLine` and symlink `cs` into `~/bin`.
 
 Steps:
 
@@ -18,4 +18,4 @@ Steps:
 
 3. Otherwise run `bash "$PLUGIN_ROOT/plugin-setup.sh"` and show the output. It links `$CLAUDE_DIR/claude-sessions` to this plugin version and points the statusline settings and `cs` at that link, so they survive plugin updates.
 
-4. Confirm to the user: hooks were registered automatically by the plugin; the statusline, the agent-panel model rows (unless the user's own `subagentStatusLine` was kept) and `cs` PATH are now set.
+4. Confirm to the user: hooks were registered automatically by the plugin; the agent list rows are drawn by the plugin's hooks module, and the statusline and `cs` PATH are now set. If the output says it removed an obsolete `subagentStatusLine`, mention that.

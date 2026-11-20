@@ -670,7 +670,7 @@ CTX_WAIT_HELP = """\
 Wait until a context holder's context size reaches a threshold, then print one line and exit.
 
 A holder is the session itself (main) or one of its subagents. statusline.sh and
-subagent-statusline.sh record each holder's latest context size in
+the plugin's agent row hook (hooks/register.ts) record each holder's latest context size in
 $CLAUDE_CONFIG_DIR/cs-ctx/<session id>/<holder>.json (default ~/.claude); this command only
 reads those files. Nothing is printed while waiting.
 
